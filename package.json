@@ -1,15 +1,29 @@
 {
-  "name": "affiliate",
-  "version": "1.0.50",
+  "name": "affiliate-data-service",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "dev": "bun run --watch src/index.ts"
+    "dev:api": "bun --filter @affiliate/api dev",
+    "dev:worker": "bun --filter @affiliate/api dev:worker",
+    "dev:web": "bun --filter @affiliate/web dev",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate deploy",
+    "db:migrate:dev": "prisma migrate dev --create-only",
+    "db:seed": "bun run apps/api/src/scripts/seed.ts",
+    "typecheck": "bun --filter '*' typecheck",
+    "test": "bun --filter '*' test",
+    "build:web": "bun --filter @affiliate/web build"
   },
-  "dependencies": {
-    "elysia": "latest"
+  "prisma": {
+    "schema": "prisma/schema.prisma"
   },
   "devDependencies": {
-    "bun-types": "latest"
-  },
-  "module": "src/index.js"
+    "prisma": "6.19.3",
+    "typescript": "5.9.3",
+    "@types/bun": "1.4.5"
+  }
 }

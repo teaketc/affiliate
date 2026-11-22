@@ -1,42 +1,22 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
-
-# dependencies
-/node_modules
-/.pnp
-.pnp.js
-
-# testing
-/coverage
-
-# next.js
-/.next/
-/out/
-
-# production
-/build
-
-# misc
+node_modules
 .DS_Store
 *.pem
+*.log
+*.tsbuildinfo
+coverage
 
-# debug
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
+# env
+.env
+.env.*
+!.env.example
 
-# local env files
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
+# build output
+apps/web/.svelte-kit
+apps/web/build
+apps/api/dist
 
-# vercel
-.vercel
+# legacy bun-create starter (not part of the workspace)
+/src
 
-**/*.trace
-**/*.zip
-**/*.tar.gz
-**/*.tgz
-**/*.log
-package-lock.json
-**/*.bun
+# local dev launch config (contains generated test secrets)
+.claude/launch.json

@@ -1,0 +1,30 @@
+{
+  "name": "@affiliate/api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "dev:worker": "bun --watch src/worker.ts",
+    "start": "bun src/index.ts",
+    "start:worker": "bun src/worker.ts",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@affiliate/shared": "workspace:*",
+    "@elysiajs/cors": "1.4.3",
+    "@elysiajs/openapi": "1.4.17",
+    "@prisma/client": "6.19.3",
+    "@sinclair/typebox": "0.34.52",
+    "bullmq": "5.81.6",
+    "elysia": "1.4.32",
+    "ioredis": "5.11.1",
+    "jose": "6.2.18",
+    "pino": "9.14.0"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.5",
+    "typescript": "5.9.3"
+  }
+}

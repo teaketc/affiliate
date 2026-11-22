@@ -1,0 +1,91 @@
+# Local / single-host stack.  cp .env.example .env  (fill secrets)  →  docker compose up -d --build
+name: affiliate
+
+x-api-env: &api-env
+  NODE_ENV: production
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  PORT: 3000
+  DATABASE_URL: postgresql://${POSTGRES_USER:-affiliate}:${POSTGRES_PASSWORD:-affiliate}@postgres:5432/${POSTGRES_DB:-affiliate}?schema=public
+  REDIS_URL: redis://redis:6379
+  JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+  JWT_TTL_SECONDS: ${JWT_TTL_SECONDS:-28800}
+  CREDENTIALS_ENCRYPTION_KEY: ${CREDENTIALS_ENCRYPTION_KEY:?set CREDENTIALS_ENCRYPTION_KEY in .env}
+  CLICK_IP_SALT: ${CLICK_IP_SALT:?set CLICK_IP_SALT in .env}
+  CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+  PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:3000}
+  RATE_LIMIT_PER_MIN: ${RATE_LIMIT_PER_MIN:-300}
+  TRUST_PROXY: ${TRUST_PROXY:-false}
+  SYNC_CONCURRENCY: ${SYNC_CONCURRENCY:-2}
+  SWAGGER_ENABLED: ${SWAGGER_ENABLED:-true}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-affiliate}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-affiliate}
+      POSTGRES_DB: ${POSTGRES_DB:-affiliate}
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # AOF persistence keeps BullMQ jobs across restarts; noeviction is required by BullMQ
+    command: ['redis-server', '--appendonly', 'yes', '--maxmemory-policy', 'noeviction']
+    volumes: [redisdata:/data]
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    build: { context: ., dockerfile: apps/api/Dockerfile }
+    image: affiliate-api:local
+    command: ['bunx', 'prisma', 'migrate', 'deploy']
+    environment: *api-env
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: 'no'
+
+  api:
+    image: affiliate-api:local
+    restart: unless-stopped
+    environment: *api-env
+    ports: ['3000:3000']
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+
+  worker:
+    image: affiliate-api:local
+    restart: unless-stopped
+    command: ['bun', 'apps/api/src/worker.ts']
+    environment: *api-env
+    healthcheck: { disable: true }
+    stop_grace_period: 60s
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+
+  web:
+    build: { context: ., dockerfile: apps/web/Dockerfile }
+    image: affiliate-web:local
+    restart: unless-stopped
+    environment:
+      API_URL: http://api:3000
+      ORIGIN: ${WEB_ORIGIN:-http://localhost:5173}
+      PORT: 3000
+    ports: ['5173:3000']
+    depends_on:
+      api: { condition: service_healthy }
+
+volumes:
+  pgdata:
+  redisdata:
