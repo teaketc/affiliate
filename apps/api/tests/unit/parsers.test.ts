@@ -14,13 +14,21 @@ describe('shopeeAdapter.parseProductUrl', () => {
 		expect(shopeeAdapter.parseProductUrl(new URL('https://shopee.sg/product/1/2'))?.externalProductId).toBe('SG:1.2');
 		expect(shopeeAdapter.parseProductUrl(new URL('https://shopee.co.th/universal-link/product/5/6'))?.externalProductId).toBe('TH:5.6');
 	});
+	test('/opaanlp/ URL (where s.shopee.* affiliate short links resolve)', () => {
+		const r = shopeeAdapter.parseProductUrl(new URL('https://shopee.co.th/opaanlp/401568048/16133303280?__mobile__=1&utm_medium=affiliates'));
+		expect(r).toEqual({ externalProductId: 'TH:401568048.16133303280', canonicalUrl: 'https://shopee.co.th/product/401568048/16133303280', slugName: null });
+	});
 	test('non-product URLs', () => {
+		expect(shopeeAdapter.parseProductUrl(new URL('https://shopee.co.th/opaanlp/abc/1'))).toBeNull();
 		expect(shopeeAdapter.parseProductUrl(new URL('https://shopee.co.th/'))).toBeNull();
 		expect(shopeeAdapter.parseProductUrl(new URL('https://s.shopee.co.th/7AbC'))).toBeNull();
 	});
 	test('blocked pages and titles', () => {
 		expect(shopeeAdapter.isAccessBlocked(new URL('https://shopee.co.th/verify/traffic'), 200, null)).toBe(true);
 		expect(shopeeAdapter.isAccessBlocked(new URL('https://shopee.co.th/buyer/login?next=x'), 200, null)).toBe(true);
+		const empty = { openGraph: {}, ogImages: [], jsonLd: [], title: null, canonical: null, description: null };
+		expect(shopeeAdapter.isAccessBlocked(new URL('https://shopee.co.th/product/1/2'), 200, empty)).toBe(true);
+		expect(shopeeAdapter.isAccessBlocked(new URL('https://shopee.co.th/product/1/2'), 200, { ...empty, title: 'Bag | Shopee Thailand' })).toBe(false);
 		expect(shopeeAdapter.cleanTitle('Cool Case | Shopee Thailand')).toBe('Cool Case');
 		expect(shopeeAdapter.cleanTitle('Shopee Thailand')).toBe('');
 	});

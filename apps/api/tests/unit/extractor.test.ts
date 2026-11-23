@@ -54,6 +54,38 @@ describe('ShopeeExtractor', () => {
 		expect(await codeOf(new ShopeeExtractor(http).extract('https://s.shopee.co.th/abc'))).toBe('PROVIDER_ACCESS_DENIED');
 	});
 
+	test('logged-out empty JS shell → PROVIDER_ACCESS_DENIED carrying verified manual-entry context', async () => {
+		const http = fakeHttp({
+			finalUrl: 'https://shopee.co.th/opaanlp/401568048/16133303280?utm_medium=affiliates',
+			body: '<!doctype html><html><head><meta charset="utf-8"><script src="/bundle.js"></script></head><body></body></html>'
+		});
+		try {
+			await new ShopeeExtractor(http).extract('https://s.shopee.co.th/4VearVsb3R');
+			throw new Error('expected failure');
+		} catch (e) {
+			expect(e).toBeInstanceOf(AppError);
+			const err = e as AppError;
+			expect(err.code).toBe('PROVIDER_ACCESS_DENIED');
+			expect(err.message).toContain('logged-in');
+			expect(err.details).toMatchObject({
+				manualEntry: {
+					marketplace: 'SHOPEE',
+					externalProductId: 'TH:401568048.16133303280',
+					productUrl: 'https://shopee.co.th/product/401568048/16133303280',
+					affiliateUrl: 'https://s.shopee.co.th/4VearVsb3R'
+				}
+			});
+		}
+	});
+
+	test('resolve() identifies the product even when the page is a login wall', async () => {
+		const http = fakeHttp({ finalUrl: 'https://shopee.co.th/opaanlp/1/2', redirectChain: ['https://shopee.co.th/opaanlp/1/2'], body: '<head></head>' });
+		const r = await new ShopeeExtractor(http).resolve('https://s.shopee.co.th/x');
+		expect(r).toMatchObject({ marketplace: 'SHOPEE', externalProductId: 'TH:1.2', productUrl: 'https://shopee.co.th/product/1/2' });
+		expect(await codeOf(new ShopeeExtractor(fakeHttp({ finalUrl: 'https://shopee.co.th/' })).resolve('https://s.shopee.co.th/x'))).toBe('INVALID_AFFILIATE_URL');
+		expect(await codeOf(new ShopeeExtractor(fakeHttp({ finalUrl: 'https://shopee.co.th/product/1/2', status: 404 })).resolve('https://shopee.co.th/product/1/2'))).toBe('PRODUCT_NOT_FOUND');
+	});
+
 	test('HTTP 403 → PROVIDER_ACCESS_DENIED, 404 → PRODUCT_NOT_FOUND', async () => {
 		expect(await codeOf(new ShopeeExtractor(fakeHttp({ finalUrl: 'https://shopee.co.th/product/1/2', status: 403 })).extract('https://shopee.co.th/product/1/2'))).toBe('PROVIDER_ACCESS_DENIED');
 		expect(await codeOf(new ShopeeExtractor(fakeHttp({ finalUrl: 'https://shopee.co.th/product/1/2', status: 404 })).extract('https://shopee.co.th/product/1/2'))).toBe('PRODUCT_NOT_FOUND');

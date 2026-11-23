@@ -1,8 +1,9 @@
 <script lang="ts">
-	import type { ExtractResultDTO } from '@affiliate/shared';
+	import type { ExtractResultDTO, ManualEntryContext } from '@affiliate/shared';
 	import { api, ApiError, errorMessage } from '$lib/api';
 	import { formatPrice } from '$lib/format';
 	import { bumpDataVersion, notify } from '$lib/toast.svelte';
+	import ManualEntryForm from './ManualEntryForm.svelte';
 	import MarketplaceBadge from './MarketplaceBadge.svelte';
 	import ProductThumb from './ProductThumb.svelte';
 	import Spinner from './Spinner.svelte';
@@ -12,6 +13,7 @@
 	let step = $state(0);
 	let result = $state<{ status: 'success' | 'partial'; message: string; data: ExtractResultDTO } | null>(null);
 	let error = $state<{ code: string; message: string } | null>(null);
+	let manualEntry = $state<ManualEntryContext | null>(null);
 
 	const steps = ['ตรวจสอบ URL', 'Resolve ลิงก์อย่างปลอดภัย', 'ดึงข้อมูลสินค้า', 'บันทึกลงฐานข้อมูล'];
 	const looksValid = $derived(/^https?:\/\/\S+$/i.test(url.trim()));
@@ -22,6 +24,7 @@
 		loading = true;
 		result = null;
 		error = null;
+		manualEntry = null;
 		step = 0;
 		// The API does all steps in one request; advance the indicator while we wait.
 		const timer = setInterval(() => (step = Math.min(step + 1, steps.length - 1)), 700);
@@ -36,8 +39,14 @@
 				notify('success', res.data.duplicate ? 'อัปเดตสินค้าที่มีอยู่แล้ว' : 'ดึงและบันทึกสินค้าแล้ว', res.data.productName);
 			}
 		} catch (err) {
-			error = err instanceof ApiError ? { code: err.code, message: err.message } : { code: 'ERROR', message: errorMessage(err) };
-			notify('error', 'ดึงข้อมูลไม่สำเร็จ', errorMessage(err));
+			manualEntry = err instanceof ApiError ? err.manualEntry : null;
+			if (manualEntry) {
+				url = '';
+				notify('warning', 'ต้องกรอกรายละเอียดสินค้าเอง', 'มาร์เก็ตเพลสไม่เปิดเผยข้อมูลสินค้าให้ผู้ที่ไม่ได้ล็อกอิน');
+			} else {
+				error = err instanceof ApiError ? { code: err.code, message: err.message } : { code: 'ERROR', message: errorMessage(err) };
+				notify('error', 'ดึงข้อมูลไม่สำเร็จ', errorMessage(err));
+			}
 			if (err instanceof ApiError && err.code !== 'RATE_LIMITED' && err.code !== 'NETWORK_ERROR') bumpDataVersion();
 		} finally {
 			clearInterval(timer);
@@ -78,6 +87,19 @@
 				</li>
 			{/each}
 		</ol>
+	{/if}
+
+	{#if manualEntry}
+		<ManualEntryForm
+			context={manualEntry}
+			oncancel={() => (manualEntry = null)}
+			onsaved={(res) => {
+				manualEntry = null;
+				result = res;
+				bumpDataVersion();
+				notify('success', res.data.duplicate ? 'อัปเดตสินค้าที่มีอยู่แล้ว' : 'บันทึกสินค้าแล้ว', res.data.productName);
+			}}
+		/>
 	{/if}
 
 	{#if error}

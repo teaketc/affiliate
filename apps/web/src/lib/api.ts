@@ -6,6 +6,8 @@ import type {
 	ExtractionLogDTO,
 	ExtractionStatus,
 	ExtractResultDTO,
+	ManualEntryContext,
+	ManualProductInput,
 	Marketplace,
 	Paginated,
 	ProductDetailDTO,
@@ -21,9 +23,23 @@ export class ApiError extends Error {
 	constructor(
 		readonly code: string,
 		message: string,
-		readonly httpStatus: number
+		readonly httpStatus: number,
+		readonly details: unknown = undefined
 	) {
 		super(message);
+	}
+
+	/** Present when the link is a real product whose details the marketplace hides (e.g. Shopee). */
+	get manualEntry(): ManualEntryContext | null {
+		const d = this.details;
+		if (typeof d !== 'object' || d === null || !('manualEntry' in d)) return null;
+		const m = (d as { manualEntry: unknown }).manualEntry;
+		if (typeof m !== 'object' || m === null) return null;
+		const c = m as Record<string, unknown>;
+		return typeof c.productUrl === 'string' && typeof c.affiliateUrl === 'string' && typeof c.externalProductId === 'string' &&
+			(c.marketplace === 'SHOPEE' || c.marketplace === 'LAZADA')
+			? { marketplace: c.marketplace, productUrl: c.productUrl, affiliateUrl: c.affiliateUrl, externalProductId: c.externalProductId }
+			: null;
 	}
 }
 
@@ -46,7 +62,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 	}
 	if (!json.success) {
 		const f = json as ApiFailure;
-		throw new ApiError(f.error.code, f.error.message, res.status);
+		throw new ApiError(f.error.code, f.error.message, res.status, f.error.details);
 	}
 	return { status: json.status, message: json.message, data: json.data };
 }
@@ -78,6 +94,7 @@ export interface LogQuery {
 
 export const api = {
 	extract: (affiliateUrl: string) => request<ExtractResultDTO>('POST', '/api/v1/extractor', { affiliateUrl }),
+	saveManual: (input: ManualProductInput) => request<ExtractResultDTO>('POST', '/api/v1/products/manual', input),
 	products: (q: ProductQuery = {}) => request<Paginated<ProductDTO>>('GET', `/api/v1/products${qs({ ...q })}`).then((r) => r.data),
 	product: (id: string) => request<ProductDetailDTO>('GET', `/api/v1/products/${id}`).then((r) => r.data),
 	updateProduct: (id: string, input: UpdateProductInput) => request<ProductDTO>('PATCH', `/api/v1/products/${id}`, input).then((r) => r.data),

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import { SHOP_TYPES, type Paginated, type ProductDTO } from '@affiliate/shared';
 	import { api, errorMessage, type ProductQuery } from '$lib/api';
 	import { SHOP_TYPE_LABEL } from '$lib/format';
@@ -44,7 +45,8 @@
 	$effect(() => {
 		void dataVersion.value;
 		void [query.page, query.pageSize, query.search, query.marketplace, query.shopType, query.order];
-		load();
+		// Only the dependencies above may trigger a refetch; load() reads/writes state itself.
+		untrack(load);
 	});
 
 	// Debounced search

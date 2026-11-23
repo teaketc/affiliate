@@ -5,7 +5,8 @@ import type { HttpClient, HttpResponse } from './http/http-client';
 import { mergeCandidates, normalizeText } from './normalizer';
 import { parseHtmlMetadata, type HtmlMetadata } from './sources/html-metadata';
 import { findJsonLdProduct, readJsonLdProduct } from './sources/json-ld';
-import type { AuthorizedProductSource, ExtractedProduct, ProductCandidate, ProductExtractor } from './types';
+import type { ManualEntryContext } from '@affiliate/shared';
+import type { AuthorizedProductSource, ExtractedProduct, ProductCandidate, ProductExtractor, ResolvedProduct } from './types';
 
 export interface ParsedProductUrl {
 	/** Region-scoped marketplace product ID, e.g. "TH:123.456". */
@@ -45,37 +46,48 @@ export class MetadataProductExtractor implements ProductExtractor {
 		this.marketplace = adapter.marketplace;
 	}
 
-	async extract(affiliateUrl: string): Promise<ExtractedProduct> {
-		const response = await this.http.get(affiliateUrl);
-		const finalUrl = new URL(response.finalUrl);
-
-		if (detectMarketplace(finalUrl.hostname) !== this.marketplace) {
-			throw new AppError('INVALID_AFFILIATE_URL', `Link resolved to a different marketplace (${finalUrl.hostname})`);
-		}
-
-		const meta = this.isHtml(response) ? await parseHtmlMetadata(response.body) : null;
-		if (ACCESS_DENIED_STATUSES.has(response.status) || this.adapter.isAccessBlocked(finalUrl, response.status, meta)) {
-			throw new AppError(
-				'PROVIDER_ACCESS_DENIED',
-				`${this.marketplace} refused automated access (HTTP ${response.status}). Login walls, CAPTCHA and anti-bot checks are not bypassed.`,
-				{ details: { finalUrl: response.finalUrl } }
-			);
-		}
+	/**
+	 * Resolves the link (short link → product page) and identifies the product from its URL,
+	 * without requiring any page metadata. Used for manual completion when the marketplace
+	 * hides product data from logged-out visitors.
+	 */
+	async resolve(affiliateUrl: string): Promise<ResolvedProduct> {
+		const { response, parsed } = await this.fetchAndIdentify(affiliateUrl);
 		if (response.status === 404 || response.status === 410) {
 			throw new AppError('PRODUCT_NOT_FOUND', 'The product page does not exist or was removed');
 		}
+		return {
+			marketplace: this.marketplace,
+			externalProductId: parsed.externalProductId,
+			productUrl: parsed.canonicalUrl,
+			finalUrl: response.finalUrl,
+			redirectChain: response.redirectChain,
+			httpStatus: response.status
+		};
+	}
+
+	async extract(affiliateUrl: string): Promise<ExtractedProduct> {
+		const { response, meta, parsed, finalUrl } = await this.fetchAndIdentify(affiliateUrl);
+
+		if (response.status === 404 || response.status === 410) {
+			throw new AppError('PRODUCT_NOT_FOUND', 'The product page does not exist or was removed');
+		}
+		if (ACCESS_DENIED_STATUSES.has(response.status) || this.adapter.isAccessBlocked(finalUrl, response.status, meta)) {
+			const manualEntry: ManualEntryContext = {
+				marketplace: this.marketplace,
+				externalProductId: parsed.externalProductId,
+				productUrl: parsed.canonicalUrl,
+				affiliateUrl
+			};
+			throw new AppError(
+				'PROVIDER_ACCESS_DENIED',
+				`${this.marketplace} only shows this product page to logged-in users${response.status === 200 ? '' : ` (HTTP ${response.status})`}, so product details are not publicly available. ` +
+					'Enter the details manually, or connect the official affiliate API. Login walls and anti-bot checks are never bypassed.',
+				{ details: { finalUrl: response.finalUrl, manualEntry } }
+			);
+		}
 		if (response.status >= 400) {
 			throw new AppError('EXTRACTION_FAILED', `Marketplace responded with HTTP ${response.status}`);
-		}
-
-		const parsedFinal = this.adapter.parseProductUrl(finalUrl);
-		const parsedCanonical = this.parseCanonicalCandidate(meta);
-		const parsed =
-			parsedFinal && parsedCanonical && parsedCanonical.externalProductId === parsedFinal.externalProductId
-				? { ...parsedFinal, canonicalUrl: parsedCanonical.canonicalUrl }
-				: (parsedFinal ?? parsedCanonical);
-		if (!parsed) {
-			throw new AppError('INVALID_AFFILIATE_URL', 'The link does not resolve to a product page');
 		}
 
 		const candidates: ProductCandidate[] = [];
@@ -138,6 +150,37 @@ export class MetadataProductExtractor implements ProductExtractor {
 			},
 			extractedAt: new Date()
 		};
+	}
+
+	private async fetchAndIdentify(affiliateUrl: string) {
+		const response = await this.http.get(affiliateUrl);
+		const finalUrl = new URL(response.finalUrl);
+		if (detectMarketplace(finalUrl.hostname) !== this.marketplace) {
+			throw new AppError('INVALID_AFFILIATE_URL', `Link resolved to a different marketplace (${finalUrl.hostname})`);
+		}
+		const meta = this.isHtml(response) ? await parseHtmlMetadata(response.body) : null;
+		const parsedFinal = this.adapter.parseProductUrl(finalUrl);
+		const parsedCanonical = this.parseCanonicalCandidate(meta);
+		const parsed =
+			parsedFinal && parsedCanonical && parsedCanonical.externalProductId === parsedFinal.externalProductId
+				? { ...parsedFinal, canonicalUrl: parsedCanonical.canonicalUrl }
+				: (parsedFinal ?? parsedCanonical);
+		if (!parsed) {
+			if (response.status === 404 || response.status === 410) {
+				throw new AppError('PRODUCT_NOT_FOUND', 'The product page does not exist or was removed');
+			}
+			// Only explicit signals here (status / login & verification paths): content heuristics such
+			// as "empty page" are only meaningful once the URL is known to be a product page.
+			if (ACCESS_DENIED_STATUSES.has(response.status) || this.adapter.isAccessBlocked(finalUrl, response.status, null)) {
+				throw new AppError(
+					'PROVIDER_ACCESS_DENIED',
+					`${this.marketplace} redirected to a login or verification page before revealing the product. Login walls and anti-bot checks are never bypassed.`,
+					{ details: { finalUrl: response.finalUrl } }
+				);
+			}
+			throw new AppError('INVALID_AFFILIATE_URL', `The link resolved to ${finalUrl.hostname}${finalUrl.pathname}, which is not a product page`);
+		}
+		return { response, meta, parsed, finalUrl };
 	}
 
 	private isHtml(res: HttpResponse): boolean {

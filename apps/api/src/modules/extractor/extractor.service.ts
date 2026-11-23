@@ -1,6 +1,7 @@
-import type { ExtractResultDTO, ExtractionStatus, Marketplace } from '@affiliate/shared';
+import type { ErrorCode, ExtractResultDTO, ExtractionStatus, ManualProductInput, Marketplace } from '@affiliate/shared';
 import { Prisma, type PrismaClient } from '@prisma/client';
 import type { ExtractorRegistry } from '../../extractors/registry';
+import { normalizeCurrency, normalizeImageUrl, normalizePrice, normalizeText } from '../../extractors/normalizer';
 import type { ExtractedProduct } from '../../extractors/types';
 import { AppError, isAppError } from '../../lib/errors';
 import type { Logger } from '../../lib/logger';
@@ -96,7 +97,12 @@ export class ExtractorService {
 		}
 	}
 
-	private async saveWithRetry(product: ExtractedProduct & { productName: string }, status: ExtractionStatus, missing: string[]) {
+	private async saveWithRetry(
+		product: ExtractedProduct & { productName: string },
+		status: ExtractionStatus,
+		missing: string[],
+		logOverride?: { errorCode: ErrorCode | null; errorMessage: string | null }
+	) {
 		for (let attempt = 1; ; attempt++) {
 			try {
 				return await this.prisma.$transaction(async (tx) => {
@@ -107,8 +113,8 @@ export class ExtractorService {
 							marketplace: product.marketplace,
 							productId: row.id,
 							status,
-							errorCode: status === 'PARTIAL' ? 'PARTIAL_EXTRACTION' : null,
-							errorMessage: status === 'PARTIAL' ? `Missing fields: ${missing.join(', ')}` : null,
+							errorCode: logOverride ? logOverride.errorCode : status === 'PARTIAL' ? 'PARTIAL_EXTRACTION' : null,
+							errorMessage: logOverride ? logOverride.errorMessage : status === 'PARTIAL' ? `Missing fields: ${missing.join(', ')}` : null,
 							extractedData: {
 								duplicate,
 								missingFields: missing,
@@ -140,6 +146,80 @@ export class ExtractorService {
 				}
 				throw error;
 			}
+		}
+	}
+
+	/**
+	 * Manual completion: the link is re-resolved server-side so the product identity
+	 * (marketplace, external ID, canonical URL) is always verified — only the descriptive
+	 * fields come from the user, and they are recorded as manual in raw_data.
+	 */
+	async saveManual(input: ManualProductInput): Promise<ExtractOutcome> {
+		const affiliateUrl = input.affiliateUrl.trim().slice(0, 2048);
+		let marketplace: Marketplace | null = null;
+		let stage = 'validate';
+		try {
+			const productName = normalizeText(input.productName, 500);
+			if (!productName) throw new AppError('VALIDATION_ERROR', 'productName is required');
+			const validated = validateAffiliateUrl(input.affiliateUrl);
+			marketplace = validated.marketplace;
+			const extractor = this.registry.get(marketplace);
+			if (!extractor) throw new AppError('UNSUPPORTED_MARKETPLACE', `No extractor registered for ${marketplace}`);
+
+			stage = 'resolve';
+			const resolved = await extractor.resolve(validated.url.toString());
+
+			const product: ExtractedProduct & { productName: string } = {
+				marketplace: resolved.marketplace,
+				productName,
+				productUrl: resolved.productUrl,
+				affiliateUrl: validated.url.toString(),
+				externalProductId: resolved.externalProductId,
+				productImage: input.productImage ? normalizeImageUrl(input.productImage) : null,
+				productImages: [],
+				shopName: normalizeText(input.shopName ?? null, 255),
+				shopType: input.shopType ?? null,
+				price: input.price === undefined ? null : normalizePrice(input.price),
+				originalPrice: input.originalPrice === undefined ? null : normalizePrice(input.originalPrice),
+				currency: normalizeCurrency(input.currency ?? null),
+				rawData: {
+					mode: 'live',
+					finalUrl: resolved.finalUrl,
+					redirectChain: resolved.redirectChain,
+					httpStatus: resolved.httpStatus,
+					sources: ['url', 'manual'],
+					fieldSources: { externalProductId: 'url' },
+					openGraph: {},
+					jsonLdProduct: null,
+					title: null,
+					manualFields: []
+				},
+				extractedAt: new Date()
+			};
+			if (input.productImage && !product.productImage) throw new AppError('VALIDATION_ERROR', 'productImage must be an http(s) URL');
+			if (product.productImage) product.productImages = [product.productImage];
+			const manualFields = (['productName', 'price', 'originalPrice', 'currency', 'productImage', 'shopName', 'shopType'] as const).filter(
+				(k) => product[k] !== null
+			);
+			product.rawData.manualFields = [...manualFields];
+			for (const k of manualFields) product.rawData.fieldSources[k] = 'manual';
+
+			stage = 'save';
+			const saved = await this.saveWithRetry(product, 'PARTIAL', [], {
+				errorCode: null,
+				errorMessage: `Product identified from the link; details entered manually: ${manualFields.join(', ')}`
+			});
+			this.logger.info('extraction.manual_saved', { marketplace, productId: saved.product.id, duplicate: saved.duplicate });
+			return {
+				ok: true,
+				status: 'PARTIAL',
+				result: { ...toProductDTO(saved.product), saved: true, duplicate: saved.duplicate, logId: saved.logId, missingFields: [] }
+			};
+		} catch (cause) {
+			const error = this.toAppError(cause, stage);
+			this.logger.warn('extraction.manual_failed', { marketplace, stage, code: error.code, message: error.message });
+			const logId = await this.writeFailedLog(affiliateUrl, marketplace, error, `manual:${stage}`);
+			return { ok: false, error, logId };
 		}
 	}
 
