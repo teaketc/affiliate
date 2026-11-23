@@ -109,6 +109,7 @@ bun run typecheck
 | Method | Path | Description |
 |---|---|---|
 | POST | `/api/v1/extractor` | `{ "affiliateUrl": "…" }` → extract + auto-save (201 new, 200 duplicate updated) |
+| POST | `/api/v1/products/manual` | Save a product whose page is hidden from logged-out visitors: the link is re-resolved server-side (verified ID + URL), descriptive fields come from the user; saved as `PARTIAL`, manual fields recorded in `raw_data` |
 | GET | `/api/v1/products` | `page, pageSize, search, marketplace, shopType, sortBy, order` |
 | GET | `/api/v1/products/:id` | Detail (includes `rawData`) |
 | PATCH | `/api/v1/products/:id` | Update editable fields |
@@ -128,7 +129,7 @@ Error codes: `INVALID_URL`, `UNSUPPORTED_MARKETPLACE`, `INVALID_AFFILIATE_URL`, 
 **Live mode reads only public page metadata.** It uses Open Graph, JSON-LD, `<title>`, the canonical link and product IDs from the URL, with an honest User-Agent. Observed behaviour while building this:
 
 - **Lazada** product pages served Open Graph name and image, but no price, so the product was saved as `PARTIAL`.
-- **Shopee** product pages are rendered by JavaScript and returned no product metadata, so the extraction failed with `EXTRACTION_FAILED`. Shopee can also redirect to a login or traffic-verification page, which is reported as `PROVIDER_ACCESS_DENIED`.
+- **Shopee** only shows product pages to logged-in users. Logged-out visitors (including this server) get an empty JavaScript shell, which then redirects to `/verify/traffic/error` ("login required"). Affiliate short links (`s.shopee.*`) resolve to `/opaanlp/{shopId}/{itemId}`. The extractor still identifies the product from that URL, returns `PROVIDER_ACCESS_DENIED` with a verified `manualEntry` context, and the dashboard opens a form for you to enter name, price and the other details yourself (`POST /api/v1/products/manual`).
 
 Login walls, CAPTCHA and anti-bot checks are never bypassed. To get reliable Shopee data, use the official affiliate API through `AuthorizedProductSource`. Make sure automated page reads are allowed by each marketplace's Terms of Service for your use case.
 

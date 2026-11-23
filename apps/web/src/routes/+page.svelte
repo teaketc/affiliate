@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import type { ProductDTO, StatisticsDTO } from '@affiliate/shared';
 	import { api, errorMessage } from '$lib/api';
 	import ExtractForm from '$lib/components/ExtractForm.svelte';
@@ -27,7 +28,8 @@
 
 	$effect(() => {
 		void dataVersion.value;
-		load();
+		// Only the dependencies above may trigger a refetch; load() reads/writes state itself.
+		untrack(load);
 	});
 
 	const cards = $derived(

@@ -1,7 +1,7 @@
 import type { Marketplace, ShopType } from '@affiliate/shared';
 
 /** Where a field value came from, in the priority order of the extraction strategy. */
-export type DataSourceName = 'official-api' | 'open-graph' | 'json-ld' | 'html' | 'url';
+export type DataSourceName = 'official-api' | 'open-graph' | 'json-ld' | 'html' | 'url' | 'manual';
 
 /** Raw, un-normalised candidate values produced by one data source. */
 export interface ProductCandidate {
@@ -38,6 +38,8 @@ export interface ExtractedProduct {
 
 export interface ExtractionRawData {
 	mode: 'live' | 'mock';
+	/** Fields typed in by the user during manual completion (never presented as extracted). */
+	manualFields?: string[];
 	finalUrl: string;
 	redirectChain: string[];
 	httpStatus: number;
@@ -61,10 +63,22 @@ export type ProductFields = Pick<
 	| 'externalProductId'
 >;
 
+/** Product identity derived from the resolved link alone (no page metadata needed). */
+export interface ResolvedProduct {
+	marketplace: Marketplace;
+	externalProductId: string;
+	productUrl: string;
+	finalUrl: string;
+	redirectChain: string[];
+	httpStatus: number;
+}
+
 /** The central provider contract. Each marketplace supplies its own implementation. */
 export interface ProductExtractor {
 	readonly marketplace: Marketplace;
 	extract(url: string): Promise<ExtractedProduct>;
+	/** Resolve the link and identify the product without needing page metadata. */
+	resolve(url: string): Promise<ResolvedProduct>;
 }
 
 /**

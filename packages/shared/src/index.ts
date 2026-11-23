@@ -129,4 +129,27 @@ export interface UpdateProductInput {
 	affiliateUrl?: string;
 }
 
+/**
+ * Returned in error.details.manualEntry when the link resolved to a real product but the
+ * marketplace hides its details from logged-out visitors (e.g. Shopee). The user can then
+ * complete the product manually via POST /api/v1/products/manual.
+ */
+export interface ManualEntryContext {
+	marketplace: Marketplace;
+	externalProductId: string;
+	productUrl: string;
+	affiliateUrl: string;
+}
+
+export interface ManualProductInput {
+	affiliateUrl: string;
+	productName: string;
+	price?: number | null;
+	originalPrice?: number | null;
+	currency?: string | null;
+	productImage?: string | null;
+	shopName?: string | null;
+	shopType?: ShopType | null;
+}
+
 export type SortOrder = 'asc' | 'desc';

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import { EXTRACTION_STATUSES, type ExtractionLogDetailDTO, type ExtractionLogDTO, type Paginated } from '@affiliate/shared';
 	import { api, errorMessage, type LogQuery } from '$lib/api';
 	import { formatDate, truncateMiddle } from '$lib/format';
@@ -36,7 +37,8 @@
 	$effect(() => {
 		void dataVersion.value;
 		void [query.page, query.pageSize, query.search, query.marketplace, query.status];
-		load();
+		// Only the dependencies above may trigger a refetch; load() reads/writes state itself.
+		untrack(load);
 	});
 
 	$effect(() => {

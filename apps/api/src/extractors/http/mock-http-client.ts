@@ -25,7 +25,9 @@ function escapeHtml(s: string): string {
  *
  * Magic path fragments for exercising error handling:
  *   mock-blocked → 403, mock-notfound → 404, mock-timeout → timeout,
- *   mock-partial → page with only a title (no price/image).
+ *   mock-partial → page with only a title (no price/image),
+ *   mock-loginwall → Shopee /opaanlp/ product page served as an empty JS shell (what real
+ *                    logged-out visitors get), so manual completion can be exercised.
  */
 export class MockHttpClient implements HttpClient {
 	readonly mode = 'mock' as const;
@@ -52,16 +54,22 @@ export class MockHttpClient implements HttpClient {
 			const seed = fnv1a(url.pathname + url.search);
 			const shopId = 100_000 + (seed % 900_000);
 			const itemId = 1_000_000 + (seed % 9_000_000);
-			const flag = ['mock-blocked', 'mock-notfound', 'mock-partial'].find((f) => path.includes(f));
+			const flag = ['mock-blocked', 'mock-notfound', 'mock-partial', 'mock-loginwall'].find((f) => path.includes(f));
 			const slug = `Mock-Product-${seed % 10_000}${flag ? `-${flag}` : ''}`;
 			productUrl =
-				marketplace === 'SHOPEE'
+				flag === 'mock-loginwall' && marketplace === 'SHOPEE'
+					? new URL(`https://shopee.co.th/opaanlp/${shopId}/${itemId}?mock=loginwall`)
+					: marketplace === 'SHOPEE'
 					? new URL(`https://shopee.co.th/${slug}-i.${shopId}.${itemId}?sp_atk=mock`)
 					: new URL(`https://www.lazada.co.th/products/${slug.toLowerCase()}-i${itemId}-s${itemId + 7}.html?mock=1`);
 			redirectChain.push(productUrl.toString());
 		}
 
 		const finalPath = productUrl.pathname.toLowerCase();
+		if (productUrl.search.includes('mock=loginwall') || finalPath.includes('mock-loginwall')) {
+			// Real Shopee: logged-out visitors get a JS shell with no title / OG / JSON-LD
+			return this.page(productUrl, 200, '<meta charset="utf-8"><script src="/assets/bundle.js"></script>', redirectChain);
+		}
 		if (finalPath.includes('mock-blocked')) return this.page(productUrl, 403, '<title>Access denied</title>', redirectChain);
 		if (finalPath.includes('mock-notfound')) return this.page(productUrl, 404, '<title>Not found</title>', redirectChain);
 

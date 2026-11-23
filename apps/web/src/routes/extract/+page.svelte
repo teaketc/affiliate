@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import type { ProductDTO } from '@affiliate/shared';
 	import { api, errorMessage } from '$lib/api';
 	import ExtractForm from '$lib/components/ExtractForm.svelte';
@@ -24,7 +25,8 @@
 	// Refreshes automatically after every successful extraction
 	$effect(() => {
 		void dataVersion.value;
-		load();
+		// Only the dependencies above may trigger a refetch; load() reads/writes state itself.
+		untrack(load);
 	});
 </script>
 

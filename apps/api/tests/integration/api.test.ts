@@ -147,6 +147,64 @@ describe.skipIf(!databaseUrl)('API integration', () => {
 		expect(await prisma.product.count()).toBe(0);
 	});
 
+	describe('Shopee login wall → manual completion', () => {
+		const shortLink = 'https://s.shopee.co.th/mock-loginwall-abc';
+		const manual = (body: Record<string, unknown>) => call<ExtractResultDTO>('POST', '/api/v1/products/manual', body);
+
+		test('extract returns PROVIDER_ACCESS_DENIED with verified manual-entry context and logs FAILED', async () => {
+			const r = await extract(shortLink);
+			expect(r.status).toBe(502);
+			if (r.json.success) throw new Error('expected failure');
+			expect(r.json.error.code).toBe('PROVIDER_ACCESS_DENIED');
+			const details = r.json.error.details as { logId: string; manualEntry: { marketplace: string; externalProductId: string; productUrl: string; affiliateUrl: string } };
+			expect(details.manualEntry.marketplace).toBe('SHOPEE');
+			expect(details.manualEntry.externalProductId).toMatch(/^TH:\d+\.\d+$/);
+			expect(details.manualEntry.productUrl).toMatch(/^https:\/\/shopee\.co\.th\/product\/\d+\/\d+$/);
+			expect(details.manualEntry.affiliateUrl).toBe(shortLink);
+			expect(await prisma.product.count()).toBe(0);
+			const log = await prisma.extractionLog.findUniqueOrThrow({ where: { id: details.logId } });
+			expect(log.status).toBe('FAILED');
+		});
+
+		test('manual save stores verified identity + user fields as PARTIAL, marked manual', async () => {
+			const failed = await extract(shortLink);
+			if (failed.json.success) throw new Error('expected failure');
+			const ctx = (failed.json.error.details as { manualEntry: { externalProductId: string; productUrl: string } }).manualEntry;
+
+			const r = await manual({ affiliateUrl: shortLink, productName: '  กระเป๋าผ้า  ', price: 299, currency: 'thb', shopName: 'ร้านทดสอบ' });
+			expect(r.status).toBe(201);
+			expect(r.json.status).toBe('partial');
+			const p = data(r);
+			expect(p).toMatchObject({ productName: 'กระเป๋าผ้า', price: 299, currency: 'THB', shopName: 'ร้านทดสอบ', productImage: null, shopType: null });
+			// identity comes from the server-side resolve, not the request
+			expect(p.externalProductId).toBe(ctx.externalProductId);
+			expect(p.productUrl).toBe(ctx.productUrl);
+
+			const row = await prisma.product.findUniqueOrThrow({ where: { id: p.id } });
+			expect(row.rawData).toMatchObject({ sources: ['url', 'manual'], manualFields: ['productName', 'price', 'currency', 'shopName'] });
+			const log = await prisma.extractionLog.findUniqueOrThrow({ where: { id: p.logId } });
+			expect(log.status).toBe('PARTIAL');
+			expect(log.errorMessage).toContain('entered manually');
+
+			// Same product again (manual) → updates, no duplicate row
+			const again = data(await manual({ affiliateUrl: shortLink, productName: 'กระเป๋าผ้า v2', price: 279 }));
+			expect(again.id).toBe(p.id);
+			expect(again.duplicate).toBe(true);
+			expect(again).toMatchObject({ productName: 'กระเป๋าผ้า v2', price: 279, shopName: 'ร้านทดสอบ' });
+			expect(await prisma.product.count()).toBe(1);
+		});
+
+		test('manual save rejects links that do not resolve to a product, and bad input', async () => {
+			expect((await manual({ affiliateUrl: 'https://shopee.co.th/', productName: 'x' })).status).toBe(400);
+			expect((await manual({ affiliateUrl: 'https://amazon.com/dp/1', productName: 'x' })).status).toBe(400);
+			expect((await manual({ affiliateUrl: shortLink, productName: '' })).status).toBe(400);
+			expect((await manual({ affiliateUrl: shortLink, productName: 'x', price: -1 })).status).toBe(400);
+			const badImg = await manual({ affiliateUrl: shortLink, productName: 'x', productImage: 'javascript:alert(1)' });
+			expect(badImg.status).toBe(400);
+			expect(await prisma.product.count()).toBe(0);
+		});
+	});
+
 	test('body validation error', async () => {
 		const r = await call('POST', '/api/v1/extractor', { nope: 1 });
 		expect(r.status).toBe(400);
