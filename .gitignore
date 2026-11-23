@@ -1,22 +1,11 @@
 node_modules
 .DS_Store
-*.pem
-*.log
-*.tsbuildinfo
 coverage
-
-# env
+build
+.svelte-kit
+dist
+*.log
+*.tgz
 .env
 .env.*
 !.env.example
-
-# build output
-apps/web/.svelte-kit
-apps/web/build
-apps/api/dist
-
-# legacy bun-create starter (not part of the workspace)
-/src
-
-# local dev launch config (contains generated test secrets)
-.claude/launch.json

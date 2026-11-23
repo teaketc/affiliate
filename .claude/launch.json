@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "api-mock",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-c", "cd apps/api && EXTRACTOR_MODE=mock PORT=3000 CORS_ORIGINS=http://localhost:5173,http://localhost:5180 bun run dev"],
+      "port": 3000
+    },
+    {
+      "name": "web",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-c", "cd apps/web && bun run dev -- --port 5180 --strictPort"],
+      "port": 5180
+    }
+  ]
+}

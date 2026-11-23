@@ -1,203 +1,135 @@
-# Shopee & Lazada Affiliate Data Service
+# Affiliate Product Extractor
 
-ระบบรวบรวมข้อมูลสินค้า ราคา และสร้างลิงก์ Affiliate จาก **Shopee Affiliate Open API** และ **Lazada Open Platform (Affiliate)** พร้อม Admin Dashboard
+วาง Affiliate URL ของ **Shopee** หรือ **Lazada** เพียงครั้งเดียว ระบบจะตรวจสอบลิงก์อย่างปลอดภัย ดึงข้อมูลสินค้า ตรวจสินค้าซ้ำ และ **บันทึกลง PostgreSQL อัตโนมัติ** พร้อม Extraction Log ทุกครั้ง ไม่มีขั้นตอน Preview หรือปุ่ม Save
 
-| ส่วน | เทคโนโลยี |
-|---|---|
-| `apps/api` | ElysiaJS 1.4 บน Bun · TypeScript strict · Prisma 6 · BullMQ 5 + ioredis · pino · OpenAPI (`/docs`) |
-| `apps/web` | SvelteKit 2 · Svelte 5 (runes) · Tailwind CSS 4 · adapter-node |
-| `packages/shared` | TypeBox schemas + types ใช้ร่วมกันระหว่าง API (validation/Swagger) และ Dashboard (form validation) |
-| `prisma` | Schema + SQL migrations (PostgreSQL 16+, Full-text search, GIN/B-tree/BRIN indexes) |
+- **Backend**: ElysiaJS · Bun · TypeScript strict · Prisma · PostgreSQL · Swagger
+- **Frontend**: SvelteKit 2 · Svelte 5 (runes) · Tailwind CSS 4 · responsive admin dashboard
+- **Infra**: Docker Compose · structured JSON logging
 
-เอกสารสถาปัตยกรรม, ER Diagram และ Index strategy: **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** · การ deploy: **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**
+Architecture, sequence diagram, ER diagram and the security model are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
----
-
-## โครงสร้าง Monorepo
+## Project structure
 
 ```
 .
 ├── apps/
-│   ├── api/                       # ElysiaJS (Bun)
+│   ├── api/                      ElysiaJS backend
+│   │   ├── prisma/               schema.prisma + SQL migrations
 │   │   ├── src/
-│   │   │   ├── app.ts             # Elysia app: CORS, security headers, rate limit, error envelope, audit, Swagger
-│   │   │   ├── container.ts       # composition root (DI)
-│   │   │   ├── index.ts           # HTTP entrypoint
-│   │   │   ├── worker.ts          # BullMQ worker entrypoint (separate process)
-│   │   │   ├── config/env.ts      # validated env (TypeBox)
-│   │   │   ├── lib/               # logger, prisma, redis, cache, crypto (AES-256-GCM), rate limiter, errors
-│   │   │   ├── plugins/           # auth macro (JWT / API key + RBAC), request context
-│   │   │   ├── providers/         # Provider interface + Shopee / Lazada adapters (HTTP only)
-│   │   │   ├── modules/<name>/    # controller → service → repository ต่อโมดูล
-│   │   │   └── scripts/seed.ts    # สร้าง SUPER_ADMIN คนแรก
-│   │   ├── test/unit/             # signers, mappers, providers (fake HTTP), services, RBAC, crypto …
-│   │   ├── test/integration/      # end-to-end: Postgres + Redis จริง, marketplace HTTP stub
-│   │   └── Dockerfile
-│   └── web/                       # SvelteKit admin dashboard
-│       ├── src/hooks.server.ts    # session (httpOnly cookie) + auth guard
-│       ├── src/lib/server/        # API client (server-only) + shared-schema form parser
-│       ├── src/routes/            # overview, products, marketplaces, accounts, campaigns, links,
-│       │                          # prices, sync, analytics, api-keys, settings, login
-│       └── Dockerfile
-├── packages/shared/               # TypeBox schemas, enums, formatters
-├── prisma/
-│   ├── schema.prisma
-│   └── migrations/20261122000000_init/migration.sql
-├── docs/ARCHITECTURE.md · docs/DEPLOYMENT.md
-├── docker-compose.yml
-└── .env.example
+│   │   │   ├── config/           env parsing / validation
+│   │   │   ├── lib/              logger, AppError, response helpers
+│   │   │   ├── security/         url-guard, ip, marketplaces allowlist, safe-fetch, rate-limit
+│   │   │   ├── extractors/       ProductExtractor interface, Shopee/Lazada adapters,
+│   │   │   │                     OG / JSON-LD parsers, normalizer, http clients (live + mock)
+│   │   │   ├── modules/          extractor · products · extraction-logs · statistics · health
+│   │   │   │                     (controller → service → repository)
+│   │   │   ├── app.ts            app composition, CORS, Swagger, central error handler
+│   │   │   └── index.ts          entrypoint
+│   │   └── tests/                unit/ (no DB) + integration/ (real PostgreSQL)
+│   └── web/                      SvelteKit dashboard
+│       └── src/{lib,routes}      /, /extract, /products, /history
+├── packages/shared/              DTOs, enums, error codes shared by api + web
+├── docs/ARCHITECTURE.md
+└── docker-compose.yml
 ```
 
-## เริ่มต้นด้วย Docker Compose
+## Quick start (Docker)
 
 ```bash
-cp .env.example .env
+docker compose up --build
 ```
 
-แก้ค่า secret ใน `.env` (สร้างด้วยคำสั่งด้านล่าง) แล้วรัน:
+- Dashboard: http://localhost:3001
+- API: http://localhost:3000 · Swagger UI: http://localhost:3000/swagger
+
+Migrations run automatically when the API container starts. To try the full flow without contacting the marketplaces:
 
 ```bash
-openssl rand -hex 32      # JWT_SECRET
-openssl rand -base64 32   # CREDENTIALS_ENCRYPTION_KEY
-openssl rand -hex 16      # CLICK_IP_SALT
+EXTRACTOR_MODE=mock docker compose up --build
 ```
 
-```bash
-docker compose up -d --build
-```
+## Local development
 
-```bash
-docker compose run --rm -e SEED_ADMIN_EMAIL=you@example.com -e SEED_ADMIN_PASSWORD='a-long-password' api bun apps/api/src/scripts/seed.ts
-```
-
-- Dashboard: http://localhost:5173 · API: http://localhost:3000 · Swagger UI: http://localhost:3000/docs
-- `migrate` service รัน `prisma migrate deploy` ก่อน `api`/`worker` จะเริ่ม
-
-## พัฒนาบนเครื่อง (ไม่ใช้ Docker)
-
-ต้องมี Bun ≥ 1.2, PostgreSQL ≥ 15, Redis ≥ 7
+Requirements: Bun ≥ 1.2, PostgreSQL ≥ 14 (with the `pg_trgm` extension available).
 
 ```bash
 bun install
 ```
 
 ```bash
-bun run db:generate && bun run db:migrate
+cp apps/api/.env.example apps/api/.env && cp apps/web/.env.example apps/web/.env
 ```
+
+Edit `DATABASE_URL` in `apps/api/.env`, then apply the migrations:
 
 ```bash
-bun run db:seed
+bun run db:deploy
 ```
 
-เปิด 3 terminal:
+Run the API and the dashboard in two terminals:
 
 ```bash
 bun run dev:api
 ```
 
 ```bash
-bun run dev:worker
-```
-
-```bash
 bun run dev:web
 ```
 
-> `apps/web` อ่าน `API_URL` (server-side เท่านั้น) — เบราว์เซอร์ไม่เคยเรียก API หรือเห็น JWT โดยตรง
+Dashboard: http://localhost:5173 · API: http://localhost:3000/swagger
 
-## Marketplace Providers — สิ่งที่ยืนยันแล้ว
-
-ไม่มีการสมมติ endpoint ที่ไม่มีในเอกสาร รายละเอียดอยู่ใน [docs/ARCHITECTURE.md §3](docs/ARCHITECTURE.md)
-
-| | สถานะ | แหล่งที่มา |
-|---|---|---|
-| **Lazada** signature (HMAC-SHA256, sorted params, uppercase hex) | ✅ ยืนยันจากเอกสารทางการ | open.lazada.com → Signature algorithm |
-| **Lazada** `/marketing/product/feed`, `/marketing/getlink` (params + response) | ✅ ยืนยันจากเอกสารทางการ | open.lazada.com → API reference |
-| **Shopee** signature `SHA256(AppId+Timestamp+Payload+Secret)` + `generateShortLink` | ✅ ยืนยันจาก client ที่เผยแพร่ | — |
-| **Shopee** `productOfferV2` fields | ⚠️ **ต้องตรวจกับเอกสารใน Affiliate Dashboard** (ต้อง login) ก่อนใช้งานจริง | `apps/api/src/providers/shopee/queries.ts` |
-
-ข้อจำกัดที่มาจาก API จริง:
-- Lazada product feed **ไม่มี parameter keyword** → ระบบกรอง keyword ในฝั่งเราหลังดึงข้อมูล; feed ไม่มี URL สินค้า → ใช้ URL หน้าร้านสาธารณะ `https://www.lazada.<tld>/products/i{id}.html` สำหรับแสดงผล และสร้างลิงก์ด้วย `inputType=productId`
-- Lazada feed ไม่มีราคาเดิม (`originalPrice`) → `discount_rate = 0` สำหรับ Lazada
-- Shopee รับ sub IDs สูงสุด 5, Lazada สูงสุด 6 (โค้ดแคมเปญจะอยู่ช่องแรกเสมอ)
-- Response ของ Shopee ถูก validate ด้วย TypeBox ถ้า schema เปลี่ยน งาน sync จะล้มเหลวพร้อมข้อความชัดเจน (ไม่เขียนข้อมูลผิดลง DB)
-
-## REST API
-
-ทุก endpoint มี schema validation + เอกสารใน Swagger (`/docs`, JSON ที่ `/docs/json`)
-
-| Method | Path | สิทธิ์ (JWT role / API-key scope) |
-|---|---|---|
-| GET | `/health` · `/ready` | public |
-| GET | `/r/:code` | public — click tracking redirect (302) |
-| POST | `/api/v1/auth/login` · GET `/api/v1/auth/me` | public · VIEWER |
-| GET | `/api/v1/products` · `/products/search` · `/products/:id` | VIEWER / `products:read` |
-| GET | `/api/v1/categories` | VIEWER / `products:read` |
-| POST | `/api/v1/affiliate/generate-link` | EDITOR / `affiliate:write` |
-| GET | `/api/v1/affiliate/links` | VIEWER / `affiliate:read` |
-| GET | `/api/v1/price-history/:productId` · `/price-compare` · `/promotions` | VIEWER / `products:read` |
-| GET | `/api/v1/sync/jobs` · `/sync/jobs/:id` · `/sync/queue` | VIEWER |
-| POST | `/api/v1/sync/products` · `/sync/jobs/:id/retry` · `/sync/jobs/:id/cancel` | EDITOR |
-| GET | `/api/v1/analytics/overview` | VIEWER / `analytics:read` |
-| GET/PATCH | `/api/v1/providers` · `/providers/:id` | VIEWER · ADMIN |
-| GET/POST/PATCH | `/api/v1/accounts` · `/accounts/:id` · POST `/accounts/:id/test` | VIEWER · ADMIN |
-| GET/POST/PATCH | `/api/v1/campaigns` · `/campaigns/:id` | VIEWER · EDITOR |
-| GET/POST/DELETE | `/api/v1/api-keys` · `/api-keys/:id` | ADMIN |
-| GET/PUT | `/api/v1/settings` | VIEWER · ADMIN |
-| GET | `/api/v1/audit-logs` | ADMIN |
-| GET/POST/PATCH | `/api/v1/users` · `/users/:id` | SUPER_ADMIN |
-
-ตัวอย่างสำหรับ External client:
+## Tests
 
 ```bash
-curl -H "X-API-Key: ak_live_xxx" "http://localhost:3000/api/v1/products/search?q=หูฟัง&minCommission=10&sort=commission_desc"
+cd apps/api && bun test tests/unit
 ```
 
-รูปแบบ error มาตรฐาน:
+Integration tests use a real, **disposable** database (its tables are truncated):
 
-```json
-{ "error": { "code": "VALIDATION_ERROR", "message": "Request validation failed", "requestId": "…", "details": [] } }
+```bash
+cd apps/api && TEST_DATABASE_URL=postgresql://user@localhost:5432/affiliate_test bun run test:integration
 ```
 
-## Security
+Coverage: IP classification, URL guard, SSRF fetch (redirect to metadata IP, rebinding, depth, size, timeout), parsers, normaliser, rate limiter, extractors, and API flows (auto-save, duplicate update without null overwrite, concurrent race, partial save, every failure code writes a FAILED log, CRUD, filters, statistics).
 
-- **Admin**: JWT HS256 (`jose`) อายุ 8 ชม. เก็บใน httpOnly + SameSite=Strict cookie ฝั่ง SvelteKit; สถานะผู้ใช้/role ถูกตรวจจาก DB ทุก request
-- **External clients**: API key (`X-API-Key`) เก็บเฉพาะ SHA-256 hash, มี scopes, per-key rate limit, วันหมดอายุ, revoke ได้; API key **ไม่สามารถ**เรียก endpoint ที่ไม่มี scope (เช่น admin routes)
-- **RBAC**: `SUPER_ADMIN > ADMIN > EDITOR > VIEWER`
-- **Provider credentials**: เข้ารหัส AES-256-GCM ที่ระดับ application, ไม่ถูกส่งกลับไปยัง client, ถูก redact ใน log
-- **SSRF guard**: endpoint ของบัญชีต้องเป็นโฮสต์ทางการของ Shopee/Lazada (https เท่านั้น); `originUrl` ต้องเป็นโดเมน marketplace
-- Rate limit: ต่อ IP (global), ต่อ API key, login brute-force (10 ครั้ง/15 นาที), outbound ต่อ marketplace (แชร์ผ่าน Redis)
-- Audit log: ทุก request `/api/*` ลง `api_logs` พร้อม `action` สำหรับการเปลี่ยนแปลงสำคัญ
-- Click tracking เก็บเฉพาะ `SHA-256(ip + salt)` ไม่เก็บ IP ดิบ
-- Security headers (API + Web), CSP บน SvelteKit, CSRF origin check ของ SvelteKit
-
-## Testing
+Typecheck everything:
 
 ```bash
 bun run typecheck
 ```
 
-```bash
-bun run test
-```
+## API
 
-Integration tests (Postgres + Redis จริง) จะถูกข้ามถ้าไม่ได้ตั้งค่า env:
+| Method | Path | Description |
+|---|---|---|
+| POST | `/api/v1/extractor` | `{ "affiliateUrl": "…" }` → extract + auto-save (201 new, 200 duplicate updated) |
+| GET | `/api/v1/products` | `page, pageSize, search, marketplace, shopType, sortBy, order` |
+| GET | `/api/v1/products/:id` | Detail (includes `rawData`) |
+| PATCH | `/api/v1/products/:id` | Update editable fields |
+| DELETE | `/api/v1/products/:id` | Delete (logs are kept, `product_id` → NULL) |
+| GET | `/api/v1/extraction-logs` | `page, pageSize, status, marketplace, search, productId` |
+| GET | `/api/v1/extraction-logs/:id` | Detail with `extractedData` and product |
+| GET | `/api/v1/statistics` | Dashboard counters |
+| GET | `/health`, `/ready` | Liveness / readiness (DB check) |
 
-```bash
-INTEGRATION_DATABASE_URL=postgresql://postgres@localhost:5432/affiliate_test INTEGRATION_REDIS_URL=redis://localhost:6379/15 bun --cwd=apps/api test test/integration
-```
+Responses follow `{ success, status: "success" | "partial" | "failed", message, data | error: { code, message } }`.
+Error codes: `INVALID_URL`, `UNSUPPORTED_MARKETPLACE`, `INVALID_AFFILIATE_URL`, `REDIRECT_FAILED`, `PRODUCT_NOT_FOUND`, `EXTRACTION_FAILED`, `PARTIAL_EXTRACTION`, `PROVIDER_ACCESS_DENIED`, `RATE_LIMITED`, `REQUEST_TIMEOUT`, `DATABASE_ERROR`, `DUPLICATE_PRODUCT` (+ `VALIDATION_ERROR`, `NOT_FOUND`, `INTERNAL_ERROR`).
 
-> ⚠️ integration test จะ `TRUNCATE` ทุกตารางและ `FLUSHDB` Redis — ใช้ฐานข้อมูลสำหรับทดสอบเท่านั้น (ต้อง `prisma migrate deploy` ก่อน)
+## Limitations (read this)
 
-ครอบคลุม: Lazada signature ตาม doc example, Shopee header, mapping จาก sample response ทางการ, retry/permanent error ของ sync, RBAC/scopes, SSRF guard, AES-GCM tamper detection, FTS ภาษาไทย, click redirect, audit log, retention, OpenAPI
+**Official APIs are not connected.** The Shopee Affiliate Open API and the Lazada Open Platform affiliate APIs require partner approval, an app key/secret and documentation that only becomes available after you register, so this project does **not** guess their endpoints. The integration point is the `AuthorizedProductSource` interface in `apps/api/src/extractors/types.ts`. Implement it once you have verified credentials and docs, and pass it to `new ShopeeExtractor(http, [yourSource])` in `extractors/registry.ts`. Its fields then take priority over page metadata.
 
-## Scripts
+**Live mode reads only public page metadata.** It uses Open Graph, JSON-LD, `<title>`, the canonical link and product IDs from the URL, with an honest User-Agent. Observed behaviour while building this:
 
-| คำสั่ง | ทำอะไร |
-|---|---|
-| `bun run dev:api` / `dev:worker` / `dev:web` | dev servers |
-| `bun run db:generate` | Prisma client |
-| `bun run db:migrate` | `prisma migrate deploy` |
-| `bun run db:migrate:dev` | สร้าง migration ใหม่ (`--create-only` — ตรวจ SQL ก่อน เพราะมี generated column/CHECK ที่เขียนมือ) |
-| `bun run db:seed` | สร้าง SUPER_ADMIN |
-| `bun run typecheck` / `bun run test` | ทุก workspace |
+- **Lazada** product pages served Open Graph name and image, but no price, so the product was saved as `PARTIAL`.
+- **Shopee** product pages are rendered by JavaScript and returned no product metadata, so the extraction failed with `EXTRACTION_FAILED`. Shopee can also redirect to a login or traffic-verification page, which is reported as `PROVIDER_ACCESS_DENIED`.
+
+Login walls, CAPTCHA and anti-bot checks are never bypassed. To get reliable Shopee data, use the official affiliate API through `AuthorizedProductSource`. Make sure automated page reads are allowed by each marketplace's Terms of Service for your use case.
+
+**`shopType` (Mall / Preferred / Normal)** stays `null` unless a source states it explicitly. Page metadata does not expose it reliably, so you can set it in the dashboard instead.
+
+**Mock mode** (`EXTRACTOR_MODE=mock`) is for development only. It makes no network calls and simulates redirects and product pages, with names prefixed `[MOCK]`. Every other part of the pipeline is the real code. Path fragments `mock-blocked`, `mock-notfound`, `mock-timeout` and `mock-partial` trigger the matching error paths.
+
+**Rate limiting** is in-memory per API instance. When you run several instances, implement the `RateLimiter` interface on Redis.
+
+**Marketplace domains** are allowlisted in `apps/api/src/security/marketplaces.ts`. If a real affiliate link redirects through a host that is not listed, it fails with `REDIRECT_FAILED` and the host name appears in the log. Add the host only after you have confirmed that it belongs to the marketplace.

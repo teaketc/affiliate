@@ -1,59 +1,65 @@
-import { Type, type Static } from '@sinclair/typebox';
-import { Value } from '@sinclair/typebox/value';
+export type ExtractorMode = 'live' | 'mock';
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
-const EnvSchema = Type.Object({
-  NODE_ENV: Type.Union([Type.Literal('development'), Type.Literal('test'), Type.Literal('production')], {
-    default: 'development'
-  }),
-  PORT: Type.Integer({ default: 3000 }),
-  LOG_LEVEL: Type.Union(
-    ['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'].map((l) => Type.Literal(l)),
-    { default: 'info' }
-  ),
-  DATABASE_URL: Type.String({ minLength: 1 }),
-  REDIS_URL: Type.String({ minLength: 1, default: 'redis://localhost:6379' }),
-  JWT_SECRET: Type.String({ minLength: 32 }),
-  JWT_ISSUER: Type.String({ default: 'affiliate-api' }),
-  JWT_AUDIENCE: Type.String({ default: 'affiliate-admin' }),
-  JWT_TTL_SECONDS: Type.Integer({ minimum: 300, default: 28_800 }),
-  /** 32 random bytes, base64 encoded: `openssl rand -base64 32` */
-  CREDENTIALS_ENCRYPTION_KEY: Type.String({ minLength: 44 }),
-  CLICK_IP_SALT: Type.String({ minLength: 16 }),
-  /** Comma separated list of allowed origins for CORS */
-  CORS_ORIGINS: Type.String({ default: 'http://localhost:5173' }),
-  /** Public base URL used to build /r/:code tracking links */
-  PUBLIC_BASE_URL: Type.String({ default: 'http://localhost:3000' }),
-  RATE_LIMIT_PER_MIN: Type.Integer({ minimum: 1, default: 300 }),
-  TRUST_PROXY: Type.Boolean({ default: false }),
-  PROVIDER_TIMEOUT_MS: Type.Integer({ minimum: 1000, default: 15_000 }),
-  SYNC_CONCURRENCY: Type.Integer({ minimum: 1, maximum: 20, default: 2 }),
-  SWAGGER_ENABLED: Type.Boolean({ default: true })
-});
-
-export type Env = Static<typeof EnvSchema>;
-
-/** Parse + validate env. Throws with a readable list of problems. */
-export function loadEnv(source: Record<string, string | undefined> = process.env): Env {
-  const input: Record<string, unknown> = {};
-  for (const key of Object.keys(EnvSchema.properties)) {
-    const v = source[key];
-    if (v !== undefined && v !== '') input[key] = v;
-  }
-  const withDefaults = Value.Default(EnvSchema, input);
-  const converted = Value.Convert(EnvSchema, withDefaults);
-  if (!Value.Check(EnvSchema, converted)) {
-    const problems = [...Value.Errors(EnvSchema, converted)].map((e) => `  ${e.path || '/'}: ${e.message}`);
-    throw new Error(`Invalid environment configuration:\n${problems.join('\n')}`);
-  }
-  const env = converted as Env;
-  if (Buffer.from(env.CREDENTIALS_ENCRYPTION_KEY, 'base64').length !== 32) {
-    throw new Error('CREDENTIALS_ENCRYPTION_KEY must decode to exactly 32 bytes (openssl rand -base64 32)');
-  }
-  return env;
+export interface AppConfig {
+	nodeEnv: string;
+	port: number;
+	host: string;
+	databaseUrl: string;
+	corsOrigins: string[];
+	extractorMode: ExtractorMode;
+	logLevel: LogLevel;
+	trustProxy: boolean;
+	rateLimit: { max: number; windowMs: number };
+	fetch: {
+		timeoutMs: number;
+		maxRedirects: number;
+		maxResponseBytes: number;
+	};
 }
 
-let cached: Env | undefined;
-export function env(): Env {
-  cached ??= loadEnv();
-  return cached;
+function readInt(name: string, fallback: number, min: number, max: number): number {
+	const raw = process.env[name];
+	if (raw === undefined || raw === '') return fallback;
+	const value = Number.parseInt(raw, 10);
+	if (!Number.isFinite(value) || value < min || value > max) {
+		throw new Error(`Environment variable ${name} must be an integer between ${min} and ${max}`);
+	}
+	return value;
+}
+
+function readEnum<T extends string>(name: string, allowed: readonly T[], fallback: T): T {
+	const raw = process.env[name];
+	if (raw === undefined || raw === '') return fallback;
+	const match = allowed.find((v) => v === raw);
+	if (!match) throw new Error(`Environment variable ${name} must be one of: ${allowed.join(', ')}`);
+	return match;
+}
+
+export function loadConfig(): AppConfig {
+	const databaseUrl = process.env.DATABASE_URL;
+	if (!databaseUrl) throw new Error('DATABASE_URL is required');
+
+	return {
+		nodeEnv: process.env.NODE_ENV ?? 'development',
+		port: readInt('PORT', 3000, 1, 65535),
+		host: process.env.HOST ?? '0.0.0.0',
+		databaseUrl,
+		corsOrigins: (process.env.CORS_ORIGINS ?? 'http://localhost:5173')
+			.split(',')
+			.map((s) => s.trim())
+			.filter(Boolean),
+		extractorMode: readEnum('EXTRACTOR_MODE', ['live', 'mock'] as const, 'live'),
+		logLevel: readEnum('LOG_LEVEL', ['debug', 'info', 'warn', 'error'] as const, 'info'),
+		trustProxy: process.env.TRUST_PROXY === 'true',
+		rateLimit: {
+			max: readInt('RATE_LIMIT_MAX', 10, 1, 10_000),
+			windowMs: readInt('RATE_LIMIT_WINDOW_MS', 60_000, 1_000, 3_600_000)
+		},
+		fetch: {
+			timeoutMs: readInt('FETCH_TIMEOUT_MS', 10_000, 1_000, 60_000),
+			maxRedirects: readInt('FETCH_MAX_REDIRECTS', 5, 0, 10),
+			maxResponseBytes: readInt('FETCH_MAX_RESPONSE_BYTES', 3_000_000, 10_000, 20_000_000)
+		}
+	};
 }

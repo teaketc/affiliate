@@ -1,165 +1,147 @@
-# Architecture — Shopee & Lazada Affiliate Data Service
+# Architecture — Affiliate Product Extractor
 
-## 1. System overview
+## 1. System architecture
 
 ```mermaid
 flowchart LR
-  subgraph Clients
-    Admin[Admin browser]
-    Ext[External client<br/>X-API-Key]
-    Shopper[Shopper clicks<br/>/r/:code]
+  U[Admin user] -->|paste affiliate URL| W[SvelteKit dashboard<br/>apps/web]
+  W -->|REST JSON| A[ElysiaJS API<br/>apps/api]
+
+  subgraph API [ElysiaJS on Bun]
+    C[Controllers<br/>validation · rate limit] --> S[ExtractorService<br/>orchestration]
+    S --> G[URL guard<br/>scheme · allowlist · IP literal]
+    S --> R[ExtractorRegistry]
+    R --> SE[ShopeeExtractor]
+    R --> LE[LazadaExtractor]
+    SE & LE --> H{HttpClient}
+    H -->|live| SF[SafeHttpClient<br/>DNS check · IP pin · redirects · limits]
+    H -->|mock| MK[MockHttpClient<br/>dev only, no network]
+    SE & LE --> P[Parsers<br/>Open Graph · JSON-LD · title/canonical · URL]
+    P --> N[Normalizer]
+    S --> PR[ProductRepository]
+    S --> LR[ExtractionLogRepository]
   end
 
-  subgraph Web["apps/web — SvelteKit (Node adapter)"]
-    SSR[SSR load / form actions<br/>JWT in httpOnly cookie]
-  end
-
-  subgraph API["apps/api — ElysiaJS on Bun"]
-    MW[Plugins: CORS · request-id · pino logger ·<br/>rate limit · JWT/API-key auth · RBAC · audit]
-    C[Controllers]
-    S[Services]
-    R[Repositories]
-    P[Provider adapters<br/>Shopee GraphQL · Lazada Open Platform]
-    Q[(BullMQ queue<br/>product-sync)]
-  end
-
-  Worker["apps/api worker process<br/>(same image, WORKER entrypoint)"]
-  PG[(PostgreSQL 16)]
-  RD[(Redis 7)]
-  SH[[Shopee Affiliate Open API]]
-  LZ[[Lazada Open Platform<br/>/marketing/*]]
-
-  Admin --> SSR -->|REST + Bearer JWT| MW
-  Ext -->|REST + X-API-Key| MW
-  Shopper -->|302 redirect + click event| MW
-  MW --> C --> S --> R --> PG
-  S --> RD
-  S --> Q --> RD
-  Worker --> RD
-  Worker --> P
-  Worker --> R
-  S --> P
-  P --> SH
-  P --> LZ
+  SF -->|HTTPS to validated public IP| M[(shopee.* / lazada.*)]
+  PR & LR --> DB[(PostgreSQL)]
 ```
 
-Key rules:
+**Layers**
 
-* **The browser never talks to PostgreSQL or the marketplaces.** SvelteKit calls the API from server code only; the admin JWT lives in an `httpOnly` cookie and is never exposed to client JS.
-* **Provider credentials** (Shopee AppID/Secret, Lazada app_key/app_secret/userToken) are stored AES‑256‑GCM encrypted in `affiliate_accounts.credentials_enc`; the API never returns them (responses expose only `hasCredentials`).
-* **Layers:** `controller` (HTTP + validation via TypeBox) → `service` (business rules, cache, queue) → `repository` (Prisma only) → `provider` (marketplace HTTP only).
-* **Worker isolation:** `src/worker.ts` runs the BullMQ `Worker` in a separate process so long syncs don't block HTTP.
-
-## 2. Library compatibility with Bun (verified Nov 2026)
-
-| Concern | Choice | Why |
+| Layer | Location | Responsibility |
 |---|---|---|
-| HTTP | Elysia 1.4 | Bun-native. |
-| Validation | TypeBox 0.34 (`@sinclair/typebox`) | Same engine as Elysia's `t`; schemas live in `packages/shared` and are reused by SvelteKit. |
-| OpenAPI | `@elysiajs/openapi` 1.4 | `@elysiajs/swagger` is superseded for Elysia 1.4; serves Scalar/Swagger UI at `/docs`. |
-| ORM | Prisma 6.19 (`prisma-client-js`) | Runs on Bun with the default query engine; Prisma 7/8 move to mandatory driver adapters (a bigger, still-changing surface), so we pin 6.x. |
-| Queue | BullMQ 5 + ioredis 5 | BullMQ runs its full test suite on Bun in CI (bullmq.io). ioredis is BullMQ's default client. Bun's built-in `RedisClient` lacks Cluster/Sentinel, so we keep ioredis. |
-| Logging | pino 9 | Structured JSON; works on Bun (no worker-thread transports used in prod). |
-| JWT | `jose` 6 | Pure Web Crypto, no native deps. |
-| Password hash | `Bun.password` (argon2id) | Built in. |
-| Encryption | `node:crypto` AES-256-GCM | Fully implemented in Bun. |
+| Controller | `src/modules/*/*.controller.ts` | HTTP routing, schema validation (Elysia `t`), Swagger docs, rate limit |
+| Service | `src/modules/*/*.service.ts` | Use-case orchestration, transactions, mapping errors to logs |
+| Repository | `src/modules/*/*.repository.ts` | Prisma queries only |
+| Provider | `src/extractors/**` | Marketplace adapters, data sources, normalisation |
+| Security | `src/security/**` | URL guard, IP classification, SSRF-safe fetch, rate limiter |
+| Shared types | `packages/shared` | DTOs, enums and error codes shared by API and dashboard |
 
-## 3. Marketplace API facts used (and how they were verified)
-
-### Lazada — verified from official docs at open.lazada.com (rendered Nov 2026)
-* Gateways: `https://api.lazada.{vn,sg,com.ph,com.my,co.th,co.id}/rest`.
-* Common params: `app_key`, `timestamp` (ms), `sign_method=sha256`, `sign`, optional `access_token`.
-* Signature: sort all params by ASCII name, concatenate `key+value`, prefix API path, HMAC‑SHA256 with app secret, **uppercase hex**.
-* `GET|POST /marketing/product/feed` — `offerType` (1 normal, 2 MM), `categoryL1?`, `mmCampaignId?`, `limit`, `page`, `userToken`, `productIds?`, `dmInviteId?`. Response `result.data[]` with `productId, productName, pictures, discountPrice, currency, brandName, sellerName, categoryL1, totalCommissionRate, sales7d, stock, outOfStock, mmCampaign*` …
-* `GET|POST /marketing/getlink` — `userToken`, `inputType` (productId/url/offerId), `inputValue` (comma separated), `subId1..6`, `subAffId`, `mmCampaignId`, `dmInviteId`, `subIdKey`. Response `result.data.product_batch_get_link_info_list[].regular_promotion_link` / `url_batch_get_link_info_list`.
-
-### Shopee Affiliate Open API — docs are behind the affiliate dashboard login
-* What is confirmed from a published client implementation: GraphQL `POST https://open-api.affiliate.shopee.<tld>/graphql`, header
-  `Authorization: SHA256 Credential={AppId}, Signature={sha256hex(AppId + Timestamp + Payload + Secret)}, Timestamp={unixSeconds}`,
-  and `mutation { generateShortLink(input:{originUrl, subIds}) { shortLink } }`.
-* `productOfferV2` field names are taken from Shopee's dashboard documentation and are isolated in
-  `apps/api/src/providers/shopee/queries.ts`; responses are validated at runtime so a schema drift fails the sync job loudly instead of writing bad data. **Verify these against your dashboard's "Open API → Document" page before going live.**
-* The endpoint is configured per account (no hard-coded region).
-
-## 4. Data flow — scheduled sync
+## 2. Extract → auto-save sequence
 
 ```mermaid
 sequenceDiagram
-  participant Cron as BullMQ repeatable job
-  participant W as Worker
-  participant RL as Redis token bucket
-  participant P as Provider adapter
+  participant UI as Dashboard
+  participant API as POST /api/v1/extractor
+  participant G as URL guard
+  participant X as Shopee/Lazada extractor
+  participant F as SafeHttpClient
   participant DB as PostgreSQL
-  Cron->>W: sync:products {accountId, keyword?, page}
-  W->>DB: sync_jobs.status = RUNNING
-  loop each page
-    W->>RL: acquire(provider)
-    W->>P: searchProducts()
-    P-->>W: NormalizedProduct[]
-    W->>DB: upsert products/images/variants/categories
-    W->>DB: insert price_histories when price changed
+
+  UI->>API: { affiliateUrl }
+  API->>API: rate limit (per IP)
+  API->>G: validate scheme, credentials, port, host allowlist
+  G-->>API: marketplace
+  API->>X: extract(url)
+  loop each hop (≤ FETCH_MAX_REDIRECTS)
+    X->>F: GET
+    F->>F: allowlist host · resolve DNS · all IPs public? · pin IP
+    F-->>X: 3xx → re-validate Location
   end
-  W->>DB: sync_jobs.status = SUCCESS (stats)
-  Note over W: on error → BullMQ retry (exponential backoff, 5 attempts) → FAILED
+  F-->>X: final HTML (size-limited, timeout)
+  X->>X: detect login/CAPTCHA wall → PROVIDER_ACCESS_DENIED (never bypassed)
+  X->>X: parse IDs from URL · OG · JSON-LD · title · normalise
+  X-->>API: ExtractedProduct
+  API->>DB: BEGIN; find duplicate (ext id → canonical URL); update non-null fields OR insert; insert log; COMMIT
+  Note over API,DB: P2002 unique violation (race) → retry transaction → update path
+  API-->>UI: success | partial | failed (+ log id)
 ```
 
-## 5. Click tracking flow
+Failures at any stage write a `FAILED` row to `extraction_logs` with `error_code`, `error_message` and the stage.
 
-`GET /r/:shortCode` → lookup `affiliate_links` (Redis cached) → insert `click_events` (hashed IP, UA, referer) asynchronously → `302` to provider `short_link`.
-
-## 6. PostgreSQL ER diagram
+## 3. ER diagram
 
 ```mermaid
 erDiagram
-  users ||--o{ api_keys : owns
-  users ||--o{ api_logs : performs
-  affiliate_providers ||--o{ affiliate_accounts : has
-  affiliate_providers ||--o{ products : lists
-  affiliate_providers ||--o{ categories : defines
-  affiliate_accounts ||--o{ affiliate_links : generates
-  affiliate_accounts ||--o{ campaigns : runs
-  affiliate_accounts ||--o{ sync_jobs : syncs
-  categories ||--o{ categories : parent
-  products ||--o{ product_images : has
-  products ||--o{ product_variants : has
-  products ||--o{ product_categories : in
-  categories ||--o{ product_categories : contains
-  products ||--o{ affiliate_links : promoted_by
-  products ||--o{ price_histories : tracked
-  products ||--o{ promotions : discounted
-  campaigns ||--o{ affiliate_links : groups
-  affiliate_links ||--o{ click_events : receives
-  api_keys ||--o{ api_logs : authenticates
-
-  users { uuid id PK; citext email UK; text password_hash; user_role role; bool is_active; timestamptz last_login_at }
-  api_keys { uuid id PK; uuid user_id FK; text name; text prefix UK; text key_hash UK; text[] scopes; int rate_limit_per_min; timestamptz expires_at; timestamptz revoked_at }
-  affiliate_providers { uuid id PK; marketplace code UK; text name; text base_url; int rate_limit_per_sec; bool is_enabled; jsonb settings }
-  affiliate_accounts { uuid id PK; uuid provider_id FK; text name; text region; text endpoint; text credentials_enc; account_status status; jsonb settings }
-  categories { uuid id PK; uuid provider_id FK; text external_id; uuid parent_id FK; text name; text slug; int level }
-  products { uuid id PK; uuid provider_id FK; text external_id; text name; numeric price; numeric original_price; numeric discount_rate; numeric commission_rate; numeric commission_amount; char currency; numeric rating; int sales_count; tsvector search_vector; jsonb raw }
-  product_images { uuid id PK; uuid product_id FK; text url; int position }
-  product_variants { uuid id PK; uuid product_id FK; text external_id; text name; numeric price; jsonb attributes }
-  product_categories { uuid product_id PK,FK; uuid category_id PK,FK }
-  campaigns { uuid id PK; uuid account_id FK; text name; text code; campaign_status status; numeric budget; timestamptz starts_at; timestamptz ends_at }
-  affiliate_links { uuid id PK; uuid account_id FK; uuid product_id FK; uuid campaign_id FK; text origin_url; text short_link; text short_code UK; text[] sub_ids; int click_count }
-  price_histories { uuid id PK; uuid product_id FK; numeric price; numeric original_price; numeric discount_rate; numeric commission_rate; timestamptz recorded_at }
-  promotions { uuid id PK; uuid product_id FK; text type; text name; numeric discount_rate; timestamptz starts_at; timestamptz ends_at }
-  sync_jobs { uuid id PK; uuid account_id FK; sync_type type; sync_status status; jsonb params; jsonb stats; int attempts; text error; timestamptz started_at; timestamptz finished_at }
-  click_events { uuid id PK; uuid link_id FK; text ip_hash; text user_agent; text referer; text country; jsonb sub_ids; timestamptz created_at }
-  api_logs { uuid id PK; uuid user_id FK; uuid api_key_id FK; text method; text path; int status; int duration_ms; text action; jsonb metadata; timestamptz created_at }
+  products ||--o{ extraction_logs : "has history"
+  products {
+    uuid id PK
+    Marketplace marketplace "SHOPEE | LAZADA"
+    varchar external_product_id "UNIQUE(marketplace, external_product_id)"
+    text product_name
+    text product_image
+    jsonb product_images
+    varchar shop_name
+    ShopType shop_type "MALL | PREFERRED | NORMAL | null"
+    numeric price "NUMERIC(12,2) ≥ 0"
+    numeric original_price "NUMERIC(12,2) ≥ 0"
+    varchar currency "ISO 4217"
+    text product_url "UNIQUE(marketplace, product_url) canonical"
+    text affiliate_url "latest submitted"
+    jsonb raw_data
+    timestamptz extracted_at
+    timestamptz created_at
+    timestamptz updated_at
+  }
+  extraction_logs {
+    uuid id PK
+    text affiliate_url "exact URL the user submitted"
+    Marketplace marketplace "nullable (unsupported URLs)"
+    uuid product_id FK "ON DELETE SET NULL"
+    ExtractionStatus status "SUCCESS | PARTIAL | FAILED"
+    varchar error_code
+    text error_message
+    jsonb extracted_data
+    timestamptz created_at
+  }
 ```
 
-### Index strategy
+**Indexes**: `products(created_at DESC)`, `products(marketplace, shop_type)`, GIN trigram on `product_name` and `shop_name` (search), `extraction_logs(created_at DESC)`, `(status)`, `(product_id)`, `(marketplace)`.
 
-| Table | Index | Type | Purpose |
-|---|---|---|---|
-| products | `search_vector` | GIN | full-text search (`simple` config — works for Thai tokens split by spaces, plus trigram fallback) |
-| products | `name gin_trgm_ops` | GIN (pg_trgm) | fuzzy/ILIKE search for Thai (no word boundaries) |
-| products | `(provider_id, external_id)` | unique B-tree | idempotent upsert |
-| products | `(provider_id, price)`, `(provider_id, commission_rate DESC)`, `(provider_id, discount_rate DESC)` | composite B-tree | marketplace + filter/sort |
-| price_histories | `(product_id, recorded_at DESC)` | composite | chart queries |
-| click_events | `(link_id, created_at DESC)`, BRIN on `created_at` | composite / BRIN | analytics range scans |
-| api_logs | BRIN `created_at`, `(user_id, created_at)` | | audit search |
-| sync_jobs | `(status, created_at DESC)`, `(account_id, created_at DESC)` | composite | dashboard |
-| affiliate_links | `short_code` unique, `(account_id, created_at DESC)` | | redirect + history |
-| products | `raw` | GIN `jsonb_path_ops` | ad-hoc attribute queries |
+## 4. Duplicate detection
+
+1. `(marketplace, external_product_id)` — IDs come from the product URL path and are region-scoped (`TH:shopId.itemId` for Shopee, `TH:itemId` for Lazada) so the same numeric ID in two countries never collides.
+2. `(marketplace, product_url)` — canonical URL with tracking params stripped.
+
+On a match, the row is updated **only with non-null values** (existing data is never replaced by `null`), `affiliate_url` becomes the latest submitted URL, and a new log row records the exact affiliate URL used. Both lookups are backed by unique constraints, so concurrent requests for the same product cannot create two rows: the losing transaction gets `P2002`, is retried, and takes the update path.
+
+## 5. Extraction strategy and status
+
+Field values are merged in priority order — the first source that yields a valid normalised value wins:
+
+1. **Authorised source** (`AuthorizedProductSource`, e.g. official affiliate API) — interface only, see README §Limitations
+2. **Open Graph** (`og:title`, `og:image`, `product:price:*`)
+3. **JSON-LD** schema.org `Product` (name, image, offers price/currency, seller)
+4. **HTML** — only `<title>` and `<link rel=canonical>`
+5. **URL** — product IDs, and the slug as a last-resort name
+
+| Status | Rule |
+|---|---|
+| `SUCCESS` | name + verifiable product URL + price + image |
+| `PARTIAL` | name + verifiable product URL, but price or image missing, or the name only came from the URL slug |
+| `FAILED` | anything else; nothing is saved to `products` |
+
+`shop_type` is only set when a source states it explicitly. Page metadata does not reliably expose Mall / Preferred status, so it stays `null` unless edited manually or supplied by an authorised source.
+
+## 6. SSRF protection
+
+| Control | Where |
+|---|---|
+| Only `http`/`https`, no credentials, default ports only, no IP-literal or `localhost`/`.local`/`.internal` hosts | `url-guard.ts` (`assertSafeUrlShape`) — every hop |
+| Marketplace domain allowlist (exact or subdomain match) | `marketplaces.ts` — every hop |
+| DNS resolved by the API; **every** returned address must be globally routable unicast (blocks loopback, RFC1918, ULA, link-local, CGNAT, metadata IPs, multicast, reserved, IPv4-mapped IPv6) | `ip.ts`, `safe-fetch.ts` |
+| DNS-rebinding defence: the connection is made to the **validated IP**, with SNI and certificate verification against the original hostname | `pinnedIpTransport` |
+| Redirects followed manually, re-validated and re-resolved on each hop, depth-limited | `safeFetch` |
+| Overall timeout, streamed body size cap | `safeFetch` |
+| Per-IP sliding-window rate limit on the extractor endpoint | `rate-limit.ts` |
+| Honest User-Agent; login walls, CAPTCHA and anti-bot pages are detected and reported, never bypassed | adapters |

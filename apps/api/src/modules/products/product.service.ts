@@ -1,69 +1,88 @@
-import { createHash } from 'node:crypto';
-import {
-  percentToRate,
-  totalPages,
-  type PaginatedResult,
-  type ProductDetailDto,
-  type ProductListQuery,
-  type ProductSummaryDto
-} from '@affiliate/shared';
-import type { Cache } from '../../lib/cache';
-import { BadRequestError, NotFoundError } from '../../lib/errors';
-import { toProductDetail, toProductSummary } from './product.mapper';
+import type { Marketplace, ProductDetailDTO, ProductDTO, Paginated, ShopType, SortOrder, UpdateProductInput } from '@affiliate/shared';
+import type { Prisma } from '@prisma/client';
+import { AppError } from '../../lib/errors';
+import { detectMarketplace } from '../../security/marketplaces';
+import { validateAffiliateUrl } from '../../security/url-guard';
+import { normalizeImageUrl } from '../../extractors/normalizer';
+import { pageMeta, paginate, toProductDTO } from '../mappers';
 import type { ProductRepository } from './product.repository';
 
-export const PRODUCT_CACHE_NS = 'products';
-const LIST_TTL = 60;
-const DETAIL_TTL = 300;
+export interface ProductListParams {
+	page?: number;
+	pageSize?: number;
+	search?: string;
+	marketplace?: Marketplace;
+	shopType?: ShopType;
+	sortBy?: 'createdAt' | 'updatedAt' | 'price' | 'productName';
+	order?: SortOrder;
+}
 
 export class ProductService {
-  constructor(
-    private readonly repo: ProductRepository,
-    private readonly cache: Cache
-  ) {}
+	constructor(private readonly repo: ProductRepository) {}
 
-  async list(query: ProductListQuery): Promise<PaginatedResult<ProductSummaryDto>> {
-    const page = query.page ?? 1;
-    const limit = query.limit ?? 20;
-    if (query.minPrice !== undefined && query.maxPrice !== undefined && query.minPrice > query.maxPrice) {
-      throw new BadRequestError('minPrice must be <= maxPrice');
-    }
-    const sort = query.sort ?? (query.q ? 'relevance' : 'updated_desc');
+	async list(params: ProductListParams): Promise<Paginated<ProductDTO>> {
+		const { page, pageSize, skip, take } = paginate(params.page, params.pageSize);
+		const search = params.search?.trim().slice(0, 200) || undefined;
+		const { items, total } = await this.repo.list({
+			skip,
+			take,
+			search,
+			marketplace: params.marketplace,
+			shopType: params.shopType,
+			sortBy: params.sortBy ?? 'createdAt',
+			order: params.order ?? 'desc'
+		});
+		return { items: items.map(toProductDTO), pagination: pageMeta(page, pageSize, total) };
+	}
 
-    const version = await this.cache.version(PRODUCT_CACHE_NS);
-    const key = `products:v${version}:${createHash('sha1').update(JSON.stringify({ ...query, page, limit, sort })).digest('hex')}`;
+	async get(id: string): Promise<ProductDetailDTO> {
+		const p = await this.repo.findById(id);
+		if (!p) throw new AppError('NOT_FOUND', 'Product not found');
+		return { ...toProductDTO(p), rawData: p.rawData };
+	}
 
-    return this.cache.wrap(key, LIST_TTL, async () => {
-      const { ids, total } = await this.repo.search({
-        q: query.q,
-        marketplace: query.marketplace,
-        categoryId: query.categoryId,
-        minPrice: query.minPrice,
-        maxPrice: query.maxPrice,
-        minDiscountRate: query.minDiscount === undefined ? undefined : percentToRate(query.minDiscount),
-        minCommissionRate: query.minCommission === undefined ? undefined : percentToRate(query.minCommission),
-        sort,
-        limit,
-        offset: (page - 1) * limit
-      });
-      const rows = await this.repo.findSummaries(ids);
-      return { data: rows.map(toProductSummary), meta: { page, limit, total, totalPages: totalPages(total, limit) } };
-    });
-  }
+	async update(id: string, input: UpdateProductInput): Promise<ProductDTO> {
+		const existing = await this.repo.findById(id);
+		if (!existing) throw new AppError('NOT_FOUND', 'Product not found');
 
-  async detail(id: string): Promise<ProductDetailDto> {
-    const version = await this.cache.version(PRODUCT_CACHE_NS);
-    const hit = await this.cache.get<ProductDetailDto>(`product:v${version}:${id}`);
-    if (hit) return hit;
-    const row = await this.repo.findDetail(id);
-    if (!row) throw new NotFoundError('Product');
-    const dto = toProductDetail(row);
-    await this.cache.set(`product:v${version}:${id}`, dto, DETAIL_TTL);
-    return dto;
-  }
+		const data: Prisma.ProductUpdateInput = {};
+		if (input.productName !== undefined) {
+			const name = input.productName.trim();
+			if (!name) throw new AppError('VALIDATION_ERROR', 'productName cannot be empty');
+			data.productName = name;
+		}
+		if (input.productImage !== undefined) {
+			if (input.productImage === null) data.productImage = null;
+			else {
+				const url = normalizeImageUrl(input.productImage);
+				if (!url) throw new AppError('VALIDATION_ERROR', 'productImage must be an http(s) URL');
+				data.productImage = url;
+			}
+		}
+		if (input.productImages !== undefined) {
+			const urls = input.productImages.map(normalizeImageUrl);
+			if (urls.some((u) => u === null)) throw new AppError('VALIDATION_ERROR', 'productImages must be http(s) URLs');
+			data.productImages = urls.filter((u): u is string => u !== null);
+		}
+		if (input.shopName !== undefined) data.shopName = input.shopName === null ? null : input.shopName.trim() || null;
+		if (input.shopType !== undefined) data.shopType = input.shopType;
+		if (input.price !== undefined) data.price = input.price;
+		if (input.originalPrice !== undefined) data.originalPrice = input.originalPrice;
+		if (input.currency !== undefined) data.currency = input.currency === null ? null : input.currency.toUpperCase();
+		if (input.affiliateUrl !== undefined) {
+			const { url, marketplace } = validateAffiliateUrl(input.affiliateUrl);
+			if (marketplace !== existing.marketplace || detectMarketplace(url.hostname) !== existing.marketplace) {
+				throw new AppError('INVALID_AFFILIATE_URL', `affiliateUrl must be a ${existing.marketplace} URL`);
+			}
+			data.affiliateUrl = url.toString();
+		}
+		return toProductDTO(await this.repo.update(id, data));
+	}
 
-  /** Called after a sync writes products. */
-  invalidate(): Promise<void> {
-    return this.cache.bump(PRODUCT_CACHE_NS);
-  }
+	async remove(id: string): Promise<{ id: string; deleted: true }> {
+		const existing = await this.repo.findById(id);
+		if (!existing) throw new AppError('NOT_FOUND', 'Product not found');
+		await this.repo.delete(id);
+		return { id, deleted: true };
+	}
 }

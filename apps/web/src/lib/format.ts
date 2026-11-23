@@ -1,20 +1,30 @@
-export { formatMoney, formatRate } from '@affiliate/shared';
+import type { ShopType } from '@affiliate/shared';
 
-export function formatDate(iso: string | null | undefined): string {
-  if (!iso) return '—';
-  return new Intl.DateTimeFormat('th-TH', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Bangkok' }).format(new Date(iso));
+export function formatPrice(price: number | null, currency: string | null): string {
+	if (price === null) return '—';
+	if (currency) {
+		try {
+			return new Intl.NumberFormat('th-TH', { style: 'currency', currency, maximumFractionDigits: 2 }).format(price);
+		} catch {
+			// unknown currency code
+		}
+	}
+	return new Intl.NumberFormat('th-TH', { maximumFractionDigits: 2 }).format(price);
 }
 
-export function formatNumber(n: number): string {
-  return new Intl.NumberFormat('th-TH').format(n);
+export function formatDate(iso: string | null): string {
+	if (!iso) return '—';
+	return new Intl.DateTimeFormat('th-TH', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(iso));
 }
 
-/** Build a URL keeping current search params, overriding the given keys. */
-export function withParams(url: URL, patch: Record<string, string | number | null | undefined>): string {
-  const u = new URL(url);
-  for (const [k, v] of Object.entries(patch)) {
-    if (v === null || v === undefined || v === '') u.searchParams.delete(k);
-    else u.searchParams.set(k, String(v));
-  }
-  return `${u.pathname}${u.search}`;
+export const SHOP_TYPE_LABEL: Record<ShopType, string> = {
+	MALL: 'Mall / LazMall',
+	PREFERRED: 'Preferred Seller',
+	NORMAL: 'Normal Shop'
+};
+
+export function truncateMiddle(s: string, max = 60): string {
+	if (s.length <= max) return s;
+	const half = Math.floor((max - 1) / 2);
+	return `${s.slice(0, half)}…${s.slice(-half)}`;
 }

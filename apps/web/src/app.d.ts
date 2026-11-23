@@ -1,17 +1,5 @@
-import type { UserDto } from '@affiliate/shared';
-
+// See https://svelte.dev/docs/kit/types#app.d.ts
 declare global {
-  namespace App {
-    interface Locals {
-      token: string | null;
-      user: UserDto | null;
-    }
-    interface Error {
-      message: string;
-      code?: string;
-      requestId?: string;
-    }
-  }
+	namespace App {}
 }
-
 export {};

@@ -1,29 +1,14 @@
 {
-  "name": "affiliate-data-service",
-  "version": "1.0.0",
+  "name": "affiliate-product-extractor",
   "private": true,
-  "workspaces": [
-    "apps/*",
-    "packages/*"
-  ],
+  "type": "module",
+  "workspaces": ["apps/*", "packages/*"],
   "scripts": {
-    "dev:api": "bun --filter @affiliate/api dev",
-    "dev:worker": "bun --filter @affiliate/api dev:worker",
-    "dev:web": "bun --filter @affiliate/web dev",
-    "db:generate": "prisma generate",
-    "db:migrate": "prisma migrate deploy",
-    "db:migrate:dev": "prisma migrate dev --create-only",
-    "db:seed": "bun run apps/api/src/scripts/seed.ts",
-    "typecheck": "bun --filter '*' typecheck",
-    "test": "bun --filter '*' test",
-    "build:web": "bun --filter @affiliate/web build"
-  },
-  "prisma": {
-    "schema": "prisma/schema.prisma"
-  },
-  "devDependencies": {
-    "prisma": "6.19.3",
-    "typescript": "5.9.3",
-    "@types/bun": "1.4.5"
+    "dev:api": "bun run --cwd apps/api dev",
+    "dev:web": "bun run --cwd apps/web dev",
+    "db:migrate": "bun run --cwd apps/api db:migrate",
+    "db:deploy": "bun run --cwd apps/api db:deploy",
+    "test": "bun run --cwd apps/api test",
+    "typecheck": "bun run --cwd packages/shared typecheck && bun run --cwd apps/api typecheck && bun run --cwd apps/web check"
   }
 }

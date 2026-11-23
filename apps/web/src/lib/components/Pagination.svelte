@@ -1,23 +1,15 @@
 <script lang="ts">
-  import { page as pageState } from '$app/state';
-  import type { PageMeta } from '@affiliate/shared';
-  import { withParams } from '$lib/format';
-
-  let { meta }: { meta: PageMeta } = $props();
+	import type { PaginationMeta } from '@affiliate/shared';
+	let { meta, onchange }: { meta: PaginationMeta; onchange: (page: number) => void } = $props();
+	const from = $derived(meta.total === 0 ? 0 : (meta.page - 1) * meta.pageSize + 1);
+	const to = $derived(Math.min(meta.page * meta.pageSize, meta.total));
 </script>
 
-{#if meta.totalPages > 1}
-  <nav class="mt-4 flex items-center justify-between text-sm" aria-label="Pagination">
-    <span class="text-slate-500">หน้า {meta.page} / {meta.totalPages} · ทั้งหมด {meta.total}</span>
-    <div class="flex gap-2">
-      {#if meta.page > 1}
-        <a class="btn-secondary" href={withParams(pageState.url, { page: meta.page - 1 })}>ก่อนหน้า</a>
-      {/if}
-      {#if meta.page < meta.totalPages}
-        <a class="btn-secondary" href={withParams(pageState.url, { page: meta.page + 1 })}>ถัดไป</a>
-      {/if}
-    </div>
-  </nav>
-{:else}
-  <p class="mt-4 text-sm text-slate-500">ทั้งหมด {meta.total} รายการ</p>
-{/if}
+<nav class="flex flex-col items-center justify-between gap-3 border-t border-slate-200 px-4 py-3 text-sm sm:flex-row" aria-label="Pagination">
+	<p class="text-slate-500">แสดง <span class="font-medium text-slate-700">{from}–{to}</span> จาก <span class="font-medium text-slate-700">{meta.total}</span></p>
+	<div class="flex items-center gap-2">
+		<button class="btn-secondary px-3 py-1.5" disabled={meta.page <= 1} onclick={() => onchange(meta.page - 1)}>← ก่อนหน้า</button>
+		<span class="text-slate-600">หน้า {meta.page} / {meta.totalPages}</span>
+		<button class="btn-secondary px-3 py-1.5" disabled={meta.page >= meta.totalPages} onclick={() => onchange(meta.page + 1)}>ถัดไป →</button>
+	</div>
+</nav>
