@@ -42,7 +42,13 @@ docker compose up --build
 - Dashboard: http://localhost:3001
 - API: http://localhost:3000 · Swagger UI: http://localhost:3000/swagger
 
-Migrations run automatically when the API container starts. To try the full flow without contacting the marketplaces:
+Migrations run automatically when the API container starts. Postgres is published on `127.0.0.1:5433` so it doesn't clash with a local Postgres. If a host port is already taken, override it with `WEB_PORT`, `API_PORT` or `POSTGRES_PORT`. CORS and the dashboard's API URL follow automatically:
+
+```bash
+WEB_PORT=3080 docker compose up --build -d
+```
+
+To try the full flow without contacting the marketplaces:
 
 ```bash
 EXTRACTOR_MODE=mock docker compose up --build

@@ -8,7 +8,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U affiliate -d affiliate"]
       interval: 5s
@@ -24,13 +24,13 @@ services:
       PORT: 3000
       LOG_LEVEL: info
       EXTRACTOR_MODE: ${EXTRACTOR_MODE:-live}
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3001}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:${WEB_PORT:-3001}}
       RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-10}
     depends_on:
       postgres:
         condition: service_healthy
     ports:
-      - "3000:3000"
+      - "${API_PORT:-3000}:3000"
     restart: unless-stopped
 
   web:
@@ -38,12 +38,12 @@ services:
       context: .
       dockerfile: apps/web/Dockerfile
     environment:
-      PUBLIC_API_BASE_URL: ${PUBLIC_API_BASE_URL:-http://localhost:3000}
-      ORIGIN: http://localhost:3001
+      PUBLIC_API_BASE_URL: ${PUBLIC_API_BASE_URL:-http://localhost:${API_PORT:-3000}}
+      ORIGIN: http://localhost:${WEB_PORT:-3001}
     depends_on:
       - api
     ports:
-      - "3001:3001"
+      - "${WEB_PORT:-3001}:3001"
     restart: unless-stopped
 
 volumes:

@@ -1,5 +1,6 @@
 # syntax=docker/dockerfile:1
 FROM oven/bun:1.2.23-debian AS deps
+RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY package.json bun.lock ./
 COPY packages/shared/package.json packages/shared/
@@ -8,10 +9,13 @@ COPY apps/web/package.json apps/web/
 RUN bun install --frozen-lockfile
 
 FROM deps AS build
+COPY tsconfig.base.json ./
 COPY packages/shared packages/shared
 COPY apps/api apps/api
 WORKDIR /app/apps/api
-RUN bunx prisma generate
+# Bun skips Prisma's postinstall, so download all engines (incl. schema engine for
+# `migrate deploy`) at build time; the runtime user cannot write to node_modules.
+RUN bunx prisma version && bunx prisma generate
 
 FROM oven/bun:1.2.23-debian AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates && rm -rf /var/lib/apt/lists/*

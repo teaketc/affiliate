@@ -6,6 +6,7 @@ COPY packages/shared/package.json packages/shared/
 COPY apps/api/package.json apps/api/
 COPY apps/web/package.json apps/web/
 RUN bun install --frozen-lockfile
+COPY tsconfig.base.json ./
 COPY packages/shared packages/shared
 COPY apps/web apps/web
 WORKDIR /app/apps/web
