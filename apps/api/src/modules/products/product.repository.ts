@@ -1,255 +1,114 @@
-import { Prisma, type PrismaClient } from '@prisma/client';
-import type { Marketplace, ProductSort } from '@affiliate/shared';
-import type { NormalizedProduct } from '../../providers/types';
+import type { Marketplace, ShopType, SortOrder } from '@affiliate/shared';
+import { Prisma, type PrismaClient, type Product } from '@prisma/client';
+import type { ExtractedProduct } from '../../extractors/types';
 
-export interface ProductFilter {
-  q?: string;
-  marketplace?: Marketplace;
-  categoryId?: string;
-  minPrice?: number;
-  maxPrice?: number;
-  /** fraction 0..1 */
-  minDiscountRate?: number;
-  /** fraction 0..1 */
-  minCommissionRate?: number;
-  sort: ProductSort;
-  limit: number;
-  offset: number;
+export interface ProductListQuery {
+	skip: number;
+	take: number;
+	search?: string;
+	marketplace?: Marketplace;
+	shopType?: ShopType;
+	sortBy: 'createdAt' | 'updatedAt' | 'price' | 'productName';
+	order: SortOrder;
 }
 
-export const productSummaryInclude = { provider: { select: { code: true } } } satisfies Prisma.ProductInclude;
-export type ProductWithProvider = Prisma.ProductGetPayload<{ include: typeof productSummaryInclude }>;
+type Tx = Prisma.TransactionClient;
 
-export const productDetailInclude = {
-  provider: { select: { code: true } },
-  images: { orderBy: { position: 'asc' } },
-  variants: { orderBy: { price: 'asc' } },
-  categories: { include: { category: { select: { id: true, name: true } } } },
-  promotions: { orderBy: { endsAt: 'desc' }, take: 20 }
-} satisfies Prisma.ProductInclude;
-export type ProductDetail = Prisma.ProductGetPayload<{ include: typeof productDetailInclude }>;
-
-export interface UpsertResult {
-  productId: string;
-  created: boolean;
-  priceChanged: boolean;
-}
-
-function escapeLike(s: string): string {
-  return s.replace(/[\\%_]/g, (c) => `\\${c}`);
+/** Only fields with a verified (non-null / non-empty) value are written on update. */
+function nonNullUpdate(data: ExtractedProduct, existing: Product): Prisma.ProductUpdateInput {
+	const update: Prisma.ProductUpdateInput = {
+		affiliateUrl: data.affiliateUrl,
+		rawData: data.rawData as unknown as Prisma.InputJsonValue,
+		extractedAt: data.extractedAt
+	};
+	if (data.productName !== null) update.productName = data.productName;
+	if (data.productImage !== null) update.productImage = data.productImage;
+	if (data.productImages.length > 0) update.productImages = data.productImages;
+	if (data.shopName !== null) update.shopName = data.shopName;
+	if (data.shopType !== null) update.shopType = data.shopType;
+	if (data.price !== null) update.price = data.price;
+	if (data.originalPrice !== null) update.originalPrice = data.originalPrice;
+	if (data.currency !== null) update.currency = data.currency;
+	// Never move an existing external ID; only fill it when it was unknown.
+	if (data.externalProductId !== null && existing.externalProductId === null) {
+		update.externalProductId = data.externalProductId;
+	}
+	return update;
 }
 
 export class ProductRepository {
-  constructor(private readonly db: PrismaClient) {}
+	constructor(private readonly prisma: PrismaClient) {}
 
-  /**
-   * Filtered/sorted id page using one parameterised SQL statement so full-text ranking,
-   * trigram fallback and numeric filters share the same plan. All values are bound parameters.
-   */
-  async search(f: ProductFilter): Promise<{ ids: string[]; total: number }> {
-    const where: Prisma.Sql[] = [Prisma.sql`p.is_active = true`];
-    const tsq = f.q ? Prisma.sql`websearch_to_tsquery('simple', ${f.q})` : null;
+	/** Duplicate detection: (marketplace, externalProductId) first, then (marketplace, canonical URL). */
+	async findDuplicate(tx: Tx, data: ExtractedProduct): Promise<Product | null> {
+		if (data.externalProductId) {
+			const byId = await tx.product.findUnique({
+				where: {
+					marketplace_externalProductId: { marketplace: data.marketplace, externalProductId: data.externalProductId }
+				}
+			});
+			if (byId) return byId;
+		}
+		return tx.product.findUnique({
+			where: { marketplace_productUrl: { marketplace: data.marketplace, productUrl: data.productUrl } }
+		});
+	}
 
-    if (f.q && tsq) {
-      where.push(Prisma.sql`(p.search_vector @@ ${tsq} OR p.name ILIKE ${`%${escapeLike(f.q)}%`})`);
-    }
-    if (f.marketplace) where.push(Prisma.sql`ap.code = ${f.marketplace}::"Marketplace"`);
-    if (f.categoryId) {
-      where.push(
-        Prisma.sql`EXISTS (SELECT 1 FROM product_categories pc WHERE pc.product_id = p.id AND pc.category_id = ${f.categoryId}::uuid)`
-      );
-    }
-    if (f.minPrice !== undefined) where.push(Prisma.sql`p.price >= ${f.minPrice}`);
-    if (f.maxPrice !== undefined) where.push(Prisma.sql`p.price <= ${f.maxPrice}`);
-    if (f.minDiscountRate !== undefined) where.push(Prisma.sql`p.discount_rate >= ${f.minDiscountRate}`);
-    if (f.minCommissionRate !== undefined) where.push(Prisma.sql`p.commission_rate >= ${f.minCommissionRate}`);
+	async upsertExtracted(tx: Tx, data: ExtractedProduct & { productName: string }): Promise<{ product: Product; duplicate: boolean }> {
+		const existing = await this.findDuplicate(tx, data);
+		if (existing) {
+			const product = await tx.product.update({ where: { id: existing.id }, data: nonNullUpdate(data, existing) });
+			return { product, duplicate: true };
+		}
+		const product = await tx.product.create({
+			data: {
+				marketplace: data.marketplace,
+				externalProductId: data.externalProductId,
+				productName: data.productName,
+				productImage: data.productImage,
+				productImages: data.productImages,
+				shopName: data.shopName,
+				shopType: data.shopType,
+				price: data.price,
+				originalPrice: data.originalPrice,
+				currency: data.currency,
+				productUrl: data.productUrl,
+				affiliateUrl: data.affiliateUrl,
+				rawData: data.rawData as unknown as Prisma.InputJsonValue,
+				extractedAt: data.extractedAt
+			}
+		});
+		return { product, duplicate: false };
+	}
 
-    const order = (() => {
-      switch (f.sort) {
-        case 'price_asc':
-          return Prisma.sql`p.price ASC, p.id`;
-        case 'price_desc':
-          return Prisma.sql`p.price DESC, p.id`;
-        case 'discount_desc':
-          return Prisma.sql`p.discount_rate DESC, p.id`;
-        case 'commission_desc':
-          return Prisma.sql`p.commission_rate DESC, p.id`;
-        case 'sales_desc':
-          return Prisma.sql`p.sales_count DESC, p.id`;
-        case 'relevance':
-          return tsq && f.q
-            ? Prisma.sql`ts_rank(p.search_vector, ${tsq}) DESC, similarity(p.name, ${f.q}) DESC, p.sales_count DESC, p.id`
-            : Prisma.sql`p.sales_count DESC, p.id`;
-        case 'updated_desc':
-          return Prisma.sql`p.updated_at DESC, p.id`;
-      }
-    })();
+	async list(q: ProductListQuery): Promise<{ items: Product[]; total: number }> {
+		const where: Prisma.ProductWhereInput = {};
+		if (q.marketplace) where.marketplace = q.marketplace;
+		if (q.shopType) where.shopType = q.shopType;
+		if (q.search) {
+			where.OR = [
+				{ productName: { contains: q.search, mode: 'insensitive' } },
+				{ shopName: { contains: q.search, mode: 'insensitive' } },
+				{ externalProductId: { contains: q.search, mode: 'insensitive' } }
+			];
+		}
+		const orderBy: Prisma.ProductOrderByWithRelationInput[] = [{ [q.sortBy]: q.order }, { id: 'asc' }];
+		const [items, total] = await this.prisma.$transaction([
+			this.prisma.product.findMany({ where, orderBy, skip: q.skip, take: q.take }),
+			this.prisma.product.count({ where })
+		]);
+		return { items, total };
+	}
 
-    const rows = await this.db.$queryRaw<{ id: string; total: bigint }[]>`
-      SELECT p.id, count(*) OVER() AS total
-      FROM products p
-      JOIN affiliate_providers ap ON ap.id = p.provider_id
-      WHERE ${Prisma.join(where, ' AND ')}
-      ORDER BY ${order}
-      LIMIT ${f.limit} OFFSET ${f.offset}`;
+	findById(id: string): Promise<Product | null> {
+		return this.prisma.product.findUnique({ where: { id } });
+	}
 
-    if (rows.length === 0 && f.offset > 0) {
-      // page past the end: still report the real total
-      const [c] = await this.db.$queryRaw<{ total: bigint }[]>`
-        SELECT count(*) AS total FROM products p JOIN affiliate_providers ap ON ap.id = p.provider_id
-        WHERE ${Prisma.join(where, ' AND ')}`;
-      return { ids: [], total: Number(c?.total ?? 0) };
-    }
-    return { ids: rows.map((r) => r.id), total: Number(rows[0]?.total ?? 0) };
-  }
+	update(id: string, data: Prisma.ProductUpdateInput): Promise<Product> {
+		return this.prisma.product.update({ where: { id }, data });
+	}
 
-  async findSummaries(ids: string[]): Promise<ProductWithProvider[]> {
-    if (ids.length === 0) return [];
-    const rows = await this.db.product.findMany({ where: { id: { in: ids } }, include: productSummaryInclude });
-    const byId = new Map(rows.map((r) => [r.id, r]));
-    return ids.map((id) => byId.get(id)).filter((r): r is ProductWithProvider => r !== undefined);
-  }
-
-  findDetail(id: string): Promise<ProductDetail | null> {
-    return this.db.product.findUnique({ where: { id }, include: productDetailInclude });
-  }
-
-  findById(id: string) {
-    return this.db.product.findUnique({ where: { id }, include: productSummaryInclude });
-  }
-
-  findExternalIds(providerId: string, limit: number, olderThan: Date): Promise<{ id: string; externalId: string }[]> {
-    return this.db.product.findMany({
-      where: { providerId, isActive: true, lastSyncedAt: { lt: olderThan } },
-      select: { id: true, externalId: true },
-      orderBy: { lastSyncedAt: 'asc' },
-      take: limit
-    });
-  }
-
-  /** Idempotent upsert of one provider product incl. images, variants, categories, promotions. */
-  async upsertNormalized(providerId: string, p: NormalizedProduct): Promise<UpsertResult> {
-    return this.db.$transaction(async (tx) => {
-      const existing = await tx.product.findUnique({
-        where: { providerId_externalId: { providerId, externalId: p.externalId } },
-        select: { id: true, price: true, discountRate: true, commissionRate: true }
-      });
-
-      const data = {
-        name: p.name,
-        productUrl: p.productUrl,
-        imageUrl: p.imageUrl,
-        shopId: p.shopId,
-        shopName: p.shopName,
-        brandName: p.brandName,
-        currency: p.currency,
-        price: new Prisma.Decimal(p.price),
-        originalPrice: p.originalPrice === null ? null : new Prisma.Decimal(p.originalPrice),
-        discountRate: new Prisma.Decimal(p.discountRate),
-        commissionRate: new Prisma.Decimal(p.commissionRate),
-        commissionAmount: p.commissionAmount === null ? null : new Prisma.Decimal(p.commissionAmount),
-        rating: p.rating === null ? null : new Prisma.Decimal(p.rating),
-        salesCount: p.salesCount,
-        stock: p.stock,
-        isActive: true,
-        raw: p.raw as Prisma.InputJsonObject,
-        lastSyncedAt: new Date()
-      };
-
-      const product = await tx.product.upsert({
-        where: { providerId_externalId: { providerId, externalId: p.externalId } },
-        create: { ...data, providerId, externalId: p.externalId },
-        update: data,
-        select: { id: true }
-      });
-
-      // images: replace set
-      await tx.productImage.deleteMany({ where: { productId: product.id, url: { notIn: p.images } } });
-      if (p.images.length > 0) {
-        await tx.productImage.createMany({
-          data: p.images.map((url, position) => ({ productId: product.id, url, position })),
-          skipDuplicates: true
-        });
-      }
-
-      // variants
-      for (const v of p.variants) {
-        const vd = {
-          name: v.name,
-          price: new Prisma.Decimal(v.price),
-          originalPrice: v.originalPrice === null ? null : new Prisma.Decimal(v.originalPrice),
-          stock: v.stock,
-          attributes: v.attributes as Prisma.InputJsonObject
-        };
-        await tx.productVariant.upsert({
-          where: { productId_externalId: { productId: product.id, externalId: v.externalId } },
-          create: { ...vd, productId: product.id, externalId: v.externalId },
-          update: vd
-        });
-      }
-
-      // categories (ordered parent → child)
-      const catIdByExternal = new Map<string, string>();
-      for (const c of [...p.categories].sort((a, b) => a.level - b.level)) {
-        const parentId = c.parentExternalId ? (catIdByExternal.get(c.parentExternalId) ?? null) : null;
-        const cat = await tx.category.upsert({
-          where: { providerId_externalId: { providerId, externalId: c.externalId } },
-          create: {
-            providerId,
-            externalId: c.externalId,
-            name: c.name ?? `Category ${c.externalId}`,
-            slug: c.externalId,
-            level: c.level,
-            parentId
-          },
-          update: { ...(c.name ? { name: c.name } : {}), level: c.level, ...(parentId ? { parentId } : {}) },
-          select: { id: true }
-        });
-        catIdByExternal.set(c.externalId, cat.id);
-      }
-      if (catIdByExternal.size > 0) {
-        await tx.productCategory.createMany({
-          data: [...catIdByExternal.values()].map((categoryId) => ({ productId: product.id, categoryId })),
-          skipDuplicates: true
-        });
-      }
-
-      // promotions
-      for (const promo of p.promotions) {
-        const pd = {
-          name: promo.name,
-          discountRate: promo.discountRate === null ? null : new Prisma.Decimal(promo.discountRate),
-          commissionRate: promo.commissionRate === null ? null : new Prisma.Decimal(promo.commissionRate),
-          startsAt: promo.startsAt,
-          endsAt: promo.endsAt,
-          metadata: promo.metadata as Prisma.InputJsonObject
-        };
-        await tx.promotion.upsert({
-          where: { productId_type_externalId: { productId: product.id, type: promo.type, externalId: promo.externalId } },
-          create: { ...pd, productId: product.id, type: promo.type, externalId: promo.externalId },
-          update: pd
-        });
-      }
-
-      // price history: only on first sight or when something price-related changed
-      const priceChanged =
-        !existing ||
-        !existing.price.equals(data.price) ||
-        !existing.discountRate.equals(data.discountRate) ||
-        !existing.commissionRate.equals(data.commissionRate);
-      if (priceChanged) {
-        await tx.priceHistory.create({
-          data: {
-            productId: product.id,
-            price: data.price,
-            originalPrice: data.originalPrice,
-            discountRate: data.discountRate,
-            commissionRate: data.commissionRate
-          }
-        });
-      }
-
-      return { productId: product.id, created: !existing, priceChanged };
-    });
-  }
+	delete(id: string): Promise<Product> {
+		return this.prisma.product.delete({ where: { id } });
+	}
 }

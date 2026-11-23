@@ -1,12 +1,9 @@
 **/node_modules
 **/.svelte-kit
 **/build
-**/dist
 **/.env
 **/.env.*
-!.env.example
+!**/.env.example
 .git
 .claude
-src
-**/*.log
-coverage
+docs

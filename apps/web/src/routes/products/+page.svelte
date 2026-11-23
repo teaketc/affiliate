@@ -1,96 +1,152 @@
 <script lang="ts">
-  import Badge from '$lib/components/Badge.svelte';
-  import Pagination from '$lib/components/Pagination.svelte';
-  import { formatMoney, formatRate } from '$lib/format';
+	import { SHOP_TYPES, type Paginated, type ProductDTO } from '@affiliate/shared';
+	import { api, errorMessage, type ProductQuery } from '$lib/api';
+	import { SHOP_TYPE_LABEL } from '$lib/format';
+	import Modal from '$lib/components/Modal.svelte';
+	import Pagination from '$lib/components/Pagination.svelte';
+	import ProductEditModal from '$lib/components/ProductEditModal.svelte';
+	import ProductTable from '$lib/components/ProductTable.svelte';
+	import Spinner from '$lib/components/Spinner.svelte';
+	import StateBlock from '$lib/components/StateBlock.svelte';
+	import { bumpDataVersion, dataVersion, notify } from '$lib/toast.svelte';
 
-  let { data } = $props();
-  let q = $derived(data.query);
+	let query = $state<Required<Pick<ProductQuery, 'page' | 'pageSize' | 'search' | 'marketplace' | 'shopType' | 'order'>>>({
+		page: 1,
+		pageSize: 20,
+		search: '',
+		marketplace: '',
+		shopType: '',
+		order: 'desc'
+	});
+	let searchInput = $state('');
+	let result = $state<Paginated<ProductDTO> | null>(null);
+	let loading = $state(true);
+	let error = $state('');
+	let editing = $state<ProductDTO | null>(null);
+	let deleting = $state<ProductDTO | null>(null);
+	let deleteBusy = $state(false);
+	let requestSeq = 0;
 
-  const sorts = [
-    ['', 'ล่าสุด'],
-    ['relevance', 'เกี่ยวข้อง'],
-    ['price_asc', 'ราคาต่ำ → สูง'],
-    ['price_desc', 'ราคาสูง → ต่ำ'],
-    ['discount_desc', 'ส่วนลดสูงสุด'],
-    ['commission_desc', 'คอมมิชชันสูงสุด'],
-    ['sales_desc', 'ขายดี']
-  ] as const;
+	async function load() {
+		const seq = ++requestSeq;
+		loading = true;
+		error = '';
+		try {
+			const r = await api.products({ ...query });
+			if (seq === requestSeq) result = r;
+		} catch (e) {
+			if (seq === requestSeq) error = errorMessage(e);
+		} finally {
+			if (seq === requestSeq) loading = false;
+		}
+	}
+
+	$effect(() => {
+		void dataVersion.value;
+		void [query.page, query.pageSize, query.search, query.marketplace, query.shopType, query.order];
+		load();
+	});
+
+	// Debounced search
+	$effect(() => {
+		const value = searchInput;
+		const t = setTimeout(() => {
+			if (value.trim() !== query.search) {
+				query.search = value.trim();
+				query.page = 1;
+			}
+		}, 350);
+		return () => clearTimeout(t);
+	});
+
+	function resetPage() {
+		query.page = 1;
+	}
+
+	async function confirmDelete() {
+		if (!deleting) return;
+		deleteBusy = true;
+		try {
+			await api.deleteProduct(deleting.id);
+			notify('success', 'ลบสินค้าแล้ว', deleting.productName);
+			deleting = null;
+			if (result && result.items.length === 1 && query.page > 1) query.page -= 1;
+			bumpDataVersion();
+		} catch (e) {
+			notify('error', 'ลบไม่สำเร็จ', errorMessage(e));
+		} finally {
+			deleteBusy = false;
+		}
+	}
 </script>
 
-<svelte:head><title>สินค้า · Affiliate Admin</title></svelte:head>
+<section class="card overflow-hidden">
+	<div class="grid gap-3 border-b border-slate-200 p-4 sm:grid-cols-2 lg:grid-cols-5">
+		<div class="lg:col-span-2">
+			<label for="search" class="label">ค้นหา</label>
+			<input id="search" class="input" type="search" placeholder="ชื่อสินค้า / ร้าน / Product ID" bind:value={searchInput} />
+		</div>
+		<div>
+			<label for="mp" class="label">Marketplace</label>
+			<select id="mp" class="input" bind:value={query.marketplace} onchange={resetPage}>
+				<option value="">ทั้งหมด</option>
+				<option value="SHOPEE">Shopee</option>
+				<option value="LAZADA">Lazada</option>
+			</select>
+		</div>
+		<div>
+			<label for="st" class="label">ประเภทร้าน</label>
+			<select id="st" class="input" bind:value={query.shopType} onchange={resetPage}>
+				<option value="">ทั้งหมด</option>
+				{#each SHOP_TYPES as t}<option value={t}>{SHOP_TYPE_LABEL[t]}</option>{/each}
+			</select>
+		</div>
+		<div>
+			<label for="ord" class="label">เรียงตามวันที่สร้าง</label>
+			<select id="ord" class="input" bind:value={query.order} onchange={resetPage}>
+				<option value="desc">ใหม่ → เก่า</option>
+				<option value="asc">เก่า → ใหม่</option>
+			</select>
+		</div>
+	</div>
 
-<h1 class="mb-4 text-xl font-semibold">สินค้า</h1>
+	{#if loading && !result}
+		<StateBlock kind="loading" title="กำลังโหลดสินค้า…" />
+	{:else if error}
+		<StateBlock kind="error" title="โหลดสินค้าไม่สำเร็จ" message={error} onretry={load} />
+	{:else if result && result.items.length === 0}
+		<StateBlock
+			kind="empty"
+			title={query.search || query.marketplace || query.shopType ? 'ไม่พบสินค้าที่ตรงกับเงื่อนไข' : 'ยังไม่มีสินค้า'}
+			message={query.search || query.marketplace || query.shopType ? 'ลองปรับคำค้นหาหรือตัวกรอง' : 'ไปที่หน้า Extract Product เพื่อเพิ่มสินค้า'}
+		/>
+	{:else if result}
+		<div class="relative">
+			{#if loading}<div class="absolute top-2 right-4 text-indigo-600"><Spinner /></div>{/if}
+			<ProductTable products={result.items} onedit={(p) => (editing = p)} ondelete={(p) => (deleting = p)} />
+		</div>
+		<Pagination meta={result.pagination} onchange={(p) => (query.page = p)} />
+	{/if}
+</section>
 
-<form method="GET" class="card mb-4 grid grid-cols-2 gap-3 md:grid-cols-4 lg:grid-cols-8">
-  <div class="col-span-2">
-    <label class="label" for="q">ค้นหา</label>
-    <input class="input" id="q" name="q" value={q.q ?? ''} placeholder="ชื่อสินค้า / แบรนด์ / ร้าน" />
-  </div>
-  <div>
-    <label class="label" for="marketplace">Marketplace</label>
-    <select class="input" id="marketplace" name="marketplace" value={q.marketplace ?? ''}>
-      <option value="">ทั้งหมด</option><option>SHOPEE</option><option>LAZADA</option>
-    </select>
-  </div>
-  <div>
-    <label class="label" for="categoryId">หมวดหมู่</label>
-    <select class="input" id="categoryId" name="categoryId" value={q.categoryId ?? ''}>
-      <option value="">ทั้งหมด</option>
-      {#each data.categories as c (c.id)}<option value={c.id}>{'— '.repeat(c.level - 1)}{c.name} ({c.productCount})</option>{/each}
-    </select>
-  </div>
-  <div>
-    <label class="label" for="minPrice">ราคาต่ำสุด</label>
-    <input class="input" id="minPrice" name="minPrice" type="number" min="0" step="0.01" value={q.minPrice ?? ''} />
-  </div>
-  <div>
-    <label class="label" for="maxPrice">ราคาสูงสุด</label>
-    <input class="input" id="maxPrice" name="maxPrice" type="number" min="0" step="0.01" value={q.maxPrice ?? ''} />
-  </div>
-  <div>
-    <label class="label" for="minDiscount">ส่วนลด ≥ (%)</label>
-    <input class="input" id="minDiscount" name="minDiscount" type="number" min="0" max="100" value={q.minDiscount ?? ''} />
-  </div>
-  <div>
-    <label class="label" for="minCommission">คอมฯ ≥ (%)</label>
-    <input class="input" id="minCommission" name="minCommission" type="number" min="0" max="100" step="0.1" value={q.minCommission ?? ''} />
-  </div>
-  <div class="col-span-2 md:col-span-2">
-    <label class="label" for="sort">เรียงตาม</label>
-    <select class="input" id="sort" name="sort" value={q.sort ?? ''}>
-      {#each sorts as [v, l] (v)}<option value={v}>{l}</option>{/each}
-    </select>
-  </div>
-  <div class="col-span-2 flex items-end gap-2">
-    <button class="btn-primary flex-1">กรอง</button>
-    <a href="/products" class="btn-secondary">ล้าง</a>
-  </div>
-</form>
+{#if editing}
+	<ProductEditModal
+		product={editing}
+		onclose={() => (editing = null)}
+		onsaved={() => {
+			editing = null;
+			bumpDataVersion();
+		}}
+	/>
+{/if}
 
-<div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-  {#each data.products.data as p (p.id)}
-    <a href="/products/{p.id}" class="card flex gap-3 transition hover:border-brand-500">
-      {#if p.imageUrl}
-        <img src={p.imageUrl} alt="" class="h-20 w-20 flex-none rounded-lg bg-slate-100 object-cover" loading="lazy" />
-      {:else}
-        <div class="h-20 w-20 flex-none rounded-lg bg-slate-100"></div>
-      {/if}
-      <div class="min-w-0 flex-1">
-        <p class="line-clamp-2 text-sm font-medium">{p.name}</p>
-        <p class="mt-1 text-sm">
-          <b>{formatMoney(p.price, p.currency)}</b>
-          {#if p.originalPrice}<s class="ml-1 text-xs text-slate-400">{formatMoney(p.originalPrice, p.currency)}</s>{/if}
-        </p>
-        <div class="mt-1 flex flex-wrap items-center gap-1 text-xs text-slate-500">
-          <Badge value={p.marketplace} />
-          {#if Number(p.discountRate) > 0}<span class="text-red-600">-{formatRate(p.discountRate, 0)}</span>{/if}
-          <span>คอมฯ {formatRate(p.commissionRate)}</span>
-        </div>
-      </div>
-    </a>
-  {:else}
-    <p class="col-span-full py-10 text-center text-slate-500">ไม่พบสินค้า — ลองซิงค์ข้อมูลจากหน้า "ซิงค์ข้อมูล"</p>
-  {/each}
-</div>
-
-<Pagination meta={data.products.meta} />
+{#if deleting}
+	<Modal title="ยืนยันการลบสินค้า" onclose={() => (deleting = null)}>
+		<p class="text-sm text-slate-700">ต้องการลบ <span class="font-semibold">{deleting.productName}</span> ใช่หรือไม่?</p>
+		<p class="mt-2 text-xs text-slate-500">ประวัติการดึงข้อมูล (Extraction Logs) จะยังถูกเก็บไว้</p>
+		{#snippet footer()}
+			<button class="btn-secondary" onclick={() => (deleting = null)} disabled={deleteBusy}>ยกเลิก</button>
+			<button class="btn-danger" onclick={confirmDelete} disabled={deleteBusy}>{#if deleteBusy}<Spinner />{/if} ลบสินค้า</button>
+		{/snippet}
+	</Modal>
+{/if}
